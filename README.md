@@ -39,9 +39,6 @@ iFacialMocap start/stop commands configured by the user.
 4. Select the downloaded ZIP and enable Yugo if needed.
 5. Open the 3D Viewport sidebar and select the **Yugo** tab.
 
-Do not use GitHub's automatically generated “Source code” ZIP as the install
-package. Use the release asset built by Blender instead.
-
 ## License
 
 Yugo is free software licensed under
