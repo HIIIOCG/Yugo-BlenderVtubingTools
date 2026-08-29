@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Blender recovery files
+*.blend[1-9]
+*.blend@*
+
+# Build artifacts
+/dist/
+/build/
+*.zip
+
+# Local environments and tools
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini

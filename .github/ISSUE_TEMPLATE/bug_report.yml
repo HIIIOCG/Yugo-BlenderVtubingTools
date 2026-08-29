@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible problem in Yugo
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: input
+    id: yugo-version
+    attributes:
+      label: Yugo version
+      placeholder: 0.1.14
+    validations:
+      required: true
+  - type: input
+    id: blender-version
+    attributes:
+      label: Blender version
+      placeholder: 5.1.2
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      placeholder: Windows 11, macOS 15, Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the actual and expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ...
+        2. Add ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output
+      description: Paste relevant output and remove private information
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I tested with the latest Yugo release
+          required: true
+        - label: I removed private avatar or network information
+          required: true
