@@ -25,6 +25,8 @@ paths_exclude_pattern = [
   ".*",
   "*.pyc",
   "*.zip",
+  "/blender-download.*",
+  "/dist/",
   "/.git/",
   "/.github/",
   "/scripts/",

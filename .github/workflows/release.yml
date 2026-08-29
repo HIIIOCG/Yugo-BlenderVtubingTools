@@ -35,14 +35,23 @@ jobs:
           mkdir -p dist
           blender --command extension validate
           blender --command extension build --output-dir dist
-          blender --command extension validate dist/yugo-${{ steps.metadata.outputs.version }}.zip
+          package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
+          if [ "$(stat -c%s "$package")" -ge 52428800 ]; then
+            echo "::error::Extension package is unexpectedly larger than 50 MiB"
+            exit 1
+          fi
+          blender --command extension validate "$package"
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/yugo-${{ steps.metadata.outputs.version }}.zip \
-            --title "Yugo ${{ steps.metadata.outputs.version }}" \
-            --generate-notes \
-            --verify-tag
+          package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$package" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$package" \
+              --title "Yugo ${{ steps.metadata.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi

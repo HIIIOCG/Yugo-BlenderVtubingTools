@@ -63,6 +63,9 @@ try {
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $Package) { throw "Blender did not create a Yugo package." }
+    if ($Package.Length -ge 50MB) {
+        throw "The extension package is unexpectedly larger than 50 MB."
+    }
 
     & $BlenderPath --command extension validate $Package.FullName
     if ($LASTEXITCODE -ne 0) { throw "Blender package validation failed." }
