@@ -42,39 +42,6 @@ iFacialMocap start/stop commands configured by the user.
 Do not use GitHub's automatically generated “Source code” ZIP as the install
 package. Use the release asset built by Blender instead.
 
-## Build and validate
-
-The repository root is also the Blender extension root. With Blender available
-on `PATH`:
-
-```text
-blender --command extension validate
-blender --command extension build --output-dir dist
-blender --command extension validate dist/yugo-0.1.14.zip
-```
-
-On Windows, `scripts/build.ps1` locates a standard Blender 5.1 installation,
-checks that all version fields agree, builds the ZIP, and validates the result.
-
-```powershell
-./scripts/build.ps1
-```
-
-GitHub Actions repeats the same checks for every pull request. Pushing a tag
-matching the manifest version, such as `v0.1.14`, creates a GitHub release and
-attaches the validated extension ZIP.
-
-## Development
-
-Run the metadata check without launching Blender:
-
-```text
-python scripts/check_version.py
-```
-
-The `tests` directory contains Blender integration checks. The official package
-build excludes development files, tests, caches, and existing ZIP archives.
-
 ## License
 
 Yugo is free software licensed under
