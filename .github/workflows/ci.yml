@@ -32,6 +32,7 @@ jobs:
 
       - name: Validate and build extension
         run: |
+          mkdir -p dist
           blender --command extension validate
           blender --command extension build --output-dir dist
           blender --command extension validate dist/yugo-${{ steps.metadata.outputs.version }}.zip
