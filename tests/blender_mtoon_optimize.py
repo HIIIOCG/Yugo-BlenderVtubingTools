@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import bpy
 
@@ -9,9 +10,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import yugo
-from yugo import mtoon_optimize as addon
+from yugo import mtoon_optimize as addon, scheduler
 
 yugo.register()
+
+
+# Match the official VRM Add-on property hierarchy without depending on a
+# user-installed extension being importable under --factory-startup.
+fake_mtoon = SimpleNamespace(shade_color_factor=(0.8, 0.6, 0.4))
+fake_material = SimpleNamespace(
+    vrm_addon_extension=SimpleNamespace(
+        mtoon1=SimpleNamespace(
+            extensions=SimpleNamespace(vrmc_materials_mtoon=fake_mtoon)
+        )
+    )
+)
+addon._apply_shadow_mix_once(fake_material, None, 0.5)
+for actual, expected in zip(fake_mtoon.shade_color_factor, (0.4, 0.3, 0.2)):
+    assert abs(actual - expected) < 0.0001
 
 
 def add_interface_socket(group, name, socket_type):
@@ -80,10 +96,30 @@ assert addon.selected_object_count(bpy.context) == 1
 assert addon.selected_mtoon_material_count(bpy.context) == 1
 assert bpy.ops.yugo.optimize(
     use_mtoon=True,
-    use_modifiers=False,
     use_mesh=False,
+    use_outline_to_mesh=False,
+    use_collection_arrange=False,
 ) == {"FINISHED"}
 assert material.name == "Body_MToonCustom", material.name
+assert material.surface_render_method == "BLENDED"
+assert addon.LEGACY_SHADOW_MIX_KEY not in tree
+assert addon._alpha_mode_requires_blended_render("BLEND")
+assert addon._alpha_mode_requires_blended_render("Transparent")
+assert addon._alpha_mode_requires_blended_render("MASK")
+assert addon._alpha_mode_requires_blended_render("Cutout")
+assert not addon._alpha_mode_requires_blended_render("OPAQUE")
+
+# Alpha fallback must not change an opaque MToon material.
+opaque_material = bpy.data.materials.new("Opaque_mtoon")
+opaque_material.use_nodes = True
+opaque_tree = opaque_material.node_tree
+opaque_tree.nodes.clear()
+opaque_official = opaque_tree.nodes.new("ShaderNodeGroup")
+opaque_official.node_tree = official_group
+opaque_official.name = addon.OFFICIAL_OUTPUT_NODE_NAME
+opaque_official.inputs["Lit Color"].default_value = (0.1, 0.2, 0.3, 1.0)
+assert not addon._set_blended_render_method(opaque_material, opaque_official)
+assert opaque_material.surface_render_method == "DITHERED"
 
 custom_nodes = [node for node in tree.nodes if bool(node.get(addon.NODE_TAG_KEY))]
 assert custom_nodes
@@ -166,11 +202,14 @@ custom_matcap_texture = next(
 )
 
 bpy.context.view_layer.update()
+scheduler.run_system_once()
 assert abs(custom_value.outputs[0].default_value - 0.63) < 0.0001
 for index, expected in enumerate((0.1, 0.2, 0.3, 0.4)):
     assert abs(custom_lit.outputs[0].default_value[index] - expected) < 0.0001
-for index, expected in enumerate((0.5, 0.6, 0.7, 0.8)):
+for index, expected in enumerate((0.25, 0.3, 0.35, 0.8)):
     assert abs(custom_shade.outputs[0].default_value[index] - expected) < 0.0001
+for index, expected in enumerate((0.25, 0.3, 0.35, 0.8)):
+    assert abs(official.inputs["Shade Color"].default_value[index] - expected) < 0.0001
 for index, expected in enumerate((0.25, 0.35, 0.45, 0.55)):
     assert abs(custom_matcap.outputs[0].default_value[index] - expected) < 0.0001
 assert custom_base_texture != base_node
@@ -190,6 +229,7 @@ base_node.image = new_base_image
 shade_node.image = new_shade_image
 matcap_node.image = new_matcap_image
 bpy.context.view_layer.update()
+scheduler.run_system_once()
 assert abs(custom_value.outputs[0].default_value - 0.21) < 0.0001
 for index, expected in enumerate((0.9, 0.8, 0.7, 0.6)):
     assert abs(custom_lit.outputs[0].default_value[index] - expected) < 0.0001
@@ -207,11 +247,49 @@ assert not any(
 )
 
 first_custom_node_count = len(custom_nodes)
-optimized, errors = addon.optimize_selected_mtoon_materials(bpy.context)
+optimized, errors = addon.optimize_selected_mtoon_materials(
+    bpy.context,
+    shadow_mix=0.25,
+)
 assert optimized == 1, errors
 assert not errors, errors
 assert material.name == "Body_MToonCustom"
 assert len([node for node in tree.nodes if bool(node.get(addon.NODE_TAG_KEY))]) == first_custom_node_count
+assert addon.LEGACY_SHADOW_MIX_KEY not in tree
+updated_custom_shade = next(
+    node
+    for node in tree.nodes
+    if bool(node.get(addon.NODE_TAG_KEY))
+    and (
+        node.name == "Shade Color_MToonCustom"
+        or node.label == "Shade Color_MToonCustom"
+    )
+)
+custom_output = tree.nodes.get(addon.CUSTOM_OUTPUT_NAME)
+assert custom_output is not None
+for index, expected in enumerate((0.25, 0.3, 0.35, 0.8)):
+    assert abs(updated_custom_shade.outputs[0].default_value[index] - expected) < 0.0001
+
+# Shadow Mix is absent from normal 2 Hz synchronization. Native Shade
+# Color changes are copied directly, without applying the Optimize value again.
+official.inputs["Shade Color"].default_value = (0.8, 0.6, 0.4, 0.7)
+addon._sync_material(material)
+for index, expected in enumerate((0.8, 0.6, 0.4, 0.7)):
+    assert abs(updated_custom_shade.outputs[0].default_value[index] - expected) < 0.0001
+assert custom_output.is_active_output
+assert not old_output.is_active_output
+
+# Files saved by 0.1.21 migrate their stored factor once, remove the old key,
+# and finish with the custom output active.
+tree[addon.LEGACY_SHADOW_MIX_KEY] = 0.25
+old_output.is_active_output = True
+addon._sync_material(material)
+assert addon.LEGACY_SHADOW_MIX_KEY not in tree
+for index, expected in enumerate((0.2, 0.15, 0.1, 0.7)):
+    assert abs(official.inputs["Shade Color"].default_value[index] - expected) < 0.0001
+    assert abs(updated_custom_shade.outputs[0].default_value[index] - expected) < 0.0001
+assert custom_output.is_active_output
+assert not old_output.is_active_output
 
 # Explicit regression coverage for both dynamic ShaderNodeMix socket families.
 mix_source_material = bpy.data.materials.new("Mix Source")

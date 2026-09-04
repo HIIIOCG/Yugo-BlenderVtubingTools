@@ -29,12 +29,17 @@ from . import visualization
 
 
 TICK_INTERVAL = 1.0 / 60.0
+FIXED_PHYSICS_STEP = 1.0 / 60.0
 ROTATION_DOT_EPSILON = 1.0e-10
 PHYSICS_RATE_FPS = {
     "AUTO": 24,
     "FPS_60": 60,
+    "FPS_30": 30,
     "FPS_24": 24,
+    "FPS_16": 16,
+    "FPS_14": 14,
     "FPS_12": 12,
+    "FPS_8": 8,
 }
 POST_APPLY_CALLBACKS_KEY = "yugo.motion_mixer.post_apply_callbacks"
 CALLBACK_NAME = "yugo.springbone.layers"
@@ -278,19 +283,26 @@ class _Target:
             self.physics_accumulator = 0.0
             self.needs_initial_solve = True
 
+        elapsed = max(float(elapsed), 0.0)
+        # Never catch up multiple physics steps from wall-clock lag. Doing so
+        # creates a feedback loop: a slow frame requests more solves, which
+        # makes the next frame slower and requests still more solves. Every
+        # Yugo mixer tick advances exactly one fixed 1/60-second Verlet step.
+        substeps = 1
+
         if fps >= 60:
             self.physics_accumulator = 0.0
             self.needs_initial_solve = False
-            return True, 1.0, interval
+            return True, 1.0, substeps
 
-        self.physics_accumulator += max(float(elapsed), 0.0)
+        self.physics_accumulator += elapsed
         due = self.needs_initial_solve or self.physics_accumulator >= interval
         if due:
             if self.physics_accumulator >= interval:
                 self.physics_accumulator %= interval
             self.needs_initial_solve = False
         alpha = min(max(self.physics_accumulator / interval, 0.0), 1.0)
-        return due, alpha, interval
+        return due, alpha, substeps
 
     def prepare_solve(self) -> None:
         if self.current_physics_rotations:
@@ -514,23 +526,28 @@ def _post_mix_update(context, delta_time) -> None:
             target.owner_id: target.capture_weight_base()
             for target in active
         }
-        due_targets = [
+        snapshot_targets = [
             target for target in active if schedules[target.owner_id][0]
         ]
-        if due_targets:
-            for target in due_targets:
+        if snapshot_targets:
+            for target in snapshot_targets:
                 target.prepare_solve()
             _update_view_layer(context)
-            solved_rotations = {}
-            for target in due_targets:
-                solved_rotations[target.owner_id] = target.solver.step(
-                    schedules[target.owner_id][2]
-                )
-            for target in due_targets:
-                target.finish_solve(solved_rotations[target.owner_id])
+
+        solved_rotations = {}
+        for target in active:
+            rotations = None
+            for _index in range(schedules[target.owner_id][2]):
+                rotations = target.solver.step(FIXED_PHYSICS_STEP)
+            if rotations is not None:
+                solved_rotations[target.owner_id] = rotations
+        for target in snapshot_targets:
+            rotations = solved_rotations.get(target.owner_id)
+            if rotations is not None:
+                target.finish_solve(rotations)
 
         for target in active:
-            _due, alpha, _interval = schedules[target.owner_id]
+            _due, alpha, _substeps = schedules[target.owner_id]
             target.apply_output(alpha, weight_bases[target.owner_id])
         # Do not force a second synchronous dependency-graph evaluation after
         # write-back. Blender's main event loop evaluates the tagged pose for

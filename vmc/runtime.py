@@ -8,14 +8,14 @@ import time
 import bpy
 from mathutils import Quaternion, Vector
 
-from .. import motion_mixer
+from .. import motion_mixer, scheduler
 from ..motion_processing import QuaternionSpring, VectorSpring
 from ..state import ensure_runtime_id, layer_locator, resolve_layer_locator
 from .mapping import build_vrm_humanoid_map, is_vrm_armature, mask_property_for_vmc_name
 from .protocol import ProtocolError, decode_packet, parse_bone_transform, parse_root_transform
 
 
-APPLY_INTERVAL = 1.0 / 60.0
+APPLY_INTERVAL = scheduler.MOTION_INTERVAL
 CONNECTED_TIMEOUT = 2.0
 MAX_DATAGRAMS_PER_TICK = 256
 
@@ -36,7 +36,16 @@ def _disconnect_hips_from_parent(context, armature, hips_bone_name) -> bool:
     previous_active = view_layer.objects.active
     previous_selected = list(context.selected_objects)
     previous_mode = previous_active.mode if previous_active is not None else "OBJECT"
+    # Blender refuses to select an object hidden with the Outliner eye. VMC only
+    # needs Edit Mode once to disconnect a connected Hips bone, so reveal the
+    # armature temporarily and restore the user's visibility state afterwards.
+    was_hidden = bool(armature.hide_get(view_layer=view_layer))
+    was_hide_viewport = bool(armature.hide_viewport)
     try:
+        if was_hide_viewport:
+            armature.hide_viewport = False
+        if was_hidden:
+            armature.hide_set(False, view_layer=view_layer)
         if previous_active is not None and previous_active.mode != "OBJECT":
             with context.temp_override(object=previous_active, active_object=previous_active):
                 bpy.ops.object.mode_set(mode="OBJECT")
@@ -72,6 +81,12 @@ def _disconnect_hips_from_parent(context, armature, hips_bone_name) -> bool:
                         bpy.ops.object.mode_set(mode=previous_mode)
             except (ReferenceError, RuntimeError):
                 pass
+        try:
+            if was_hidden:
+                armature.hide_set(True, view_layer=view_layer)
+            armature.hide_viewport = was_hide_viewport
+        except ReferenceError:
+            pass
     return True
 
 
@@ -90,7 +105,7 @@ def _convert_vmc_transform(transform):
 def _redraw_view3d() -> None:
     global _last_redraw_time
     now = time.monotonic()
-    if now - _last_redraw_time < 0.25:
+    if now - _last_redraw_time < scheduler.SYSTEM_INTERVAL:
         return
     _last_redraw_time = now
     window_manager = getattr(bpy.context, "window_manager", None)
@@ -267,7 +282,6 @@ class _Receiver:
         self.protocol_error_count = 0
         self.received_bones = set()
         self.timer = self._timer
-        bpy.app.timers.register(self.timer, first_interval=0.0, persistent=True)
 
     def add_target(self, target):
         self.targets[target.layer_key] = target
@@ -310,9 +324,6 @@ class _Receiver:
     def _timer(self):
         if self.socket is None:
             return None
-        if not bpy.app.online_access:
-            stop()
-            return None
         self.poll()
         if _undo_in_progress:
             return APPLY_INTERVAL
@@ -335,7 +346,7 @@ class _Receiver:
         _redraw_view3d()
         return APPLY_INTERVAL if self.targets else None
 
-    def close(self):
+    def close(self, *, clear=True):
         receiver = self.socket
         self.socket = None
         if receiver is not None:
@@ -343,13 +354,9 @@ class _Receiver:
                 receiver.close()
             except OSError:
                 pass
-        try:
-            if bpy.app.timers.is_registered(self.timer):
-                bpy.app.timers.unregister(self.timer)
-        except ValueError:
-            pass
-        for target in tuple(self.targets.values()):
-            target.clear()
+        if clear:
+            for target in tuple(self.targets.values()):
+                target.clear()
         self.targets.clear()
 
 
@@ -369,11 +376,6 @@ def _endpoint(layer):
 def start(context, scene, layer, armature) -> None:
     if is_layer_running(layer):
         raise RuntimeError("This VMC layer is already connected")
-    if not bpy.app.online_access:
-        raise RuntimeError(
-            "Online access is disabled. Enable Allow Online Access in Blender "
-            "Preferences before starting a VMC receiver"
-        )
     if armature is None or getattr(armature, "type", "") != "ARMATURE":
         raise RuntimeError("Select a VRM Armature first")
     if not is_vrm_armature(armature):
@@ -403,10 +405,10 @@ def start(context, scene, layer, armature) -> None:
         raise
 
 
-def stop(layer=None) -> None:
+def stop(layer=None, *, clear=True) -> None:
     if layer is None:
         for receiver in tuple(_receivers.values()):
-            receiver.close()
+            receiver.close(clear=clear)
         _receivers.clear()
         _layer_receivers.clear()
         _redraw_view3d()
@@ -417,9 +419,9 @@ def stop(layer=None) -> None:
     receiver = _layer_receivers.pop(layer_key, None)
     if receiver is None:
         return
-    receiver.remove_target(layer_key)
+    receiver.remove_target(layer_key, clear=clear)
     if not receiver.targets:
-        receiver.close()
+        receiver.close(clear=clear)
         _receivers.pop(receiver.key, None)
     _redraw_view3d()
 
@@ -495,9 +497,15 @@ def finish_undo():
         _undo_in_progress = False
 
 
+def _motion_update(_context, _delta_time):
+    for receiver in tuple(_receivers.values()):
+        receiver._timer()
+
+
 def register():
-    pass
+    scheduler.add_motion("vmc", _motion_update, priority=100)
 
 
 def unregister():
+    scheduler.remove_motion("vmc")
     stop()

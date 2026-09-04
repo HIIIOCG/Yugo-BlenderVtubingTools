@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Optional
 
 import bpy
-from bpy.app.handlers import persistent
 from bpy.types import Context, Material, Node, NodeSocket, NodeTree
+
+from . import scheduler
 
 
 TEMPLATE_MATERIAL_NAME = "_MToonCustom"
@@ -16,6 +17,9 @@ CUSTOM_SUFFIX = "_MToonCustom"
 CUSTOM_FRAME_NAME = "Frame_MToonCustom"
 NODE_TAG_KEY = "yugo_mtoon_custom_node"
 GROUP_TAG_KEY = "yugo_mtoon_custom_group"
+# 0.1.21 stored Shadow Mix on every optimized node tree and read it from the
+# depsgraph handler. Keep the key only to migrate those files once.
+LEGACY_SHADOW_MIX_KEY = "yugo_mtoon_shadow_mix"
 OFFICIAL_OUTPUT_NODE_NAME = "Mtoon1Material.Mtoon1Output"
 OFFICIAL_OUTPUT_GROUP_NAME = "VRM Add-on MToon 1.0 Output Revision 1"
 CUSTOM_OUTPUT_NAME = "_MToonCustom Output"
@@ -40,7 +44,7 @@ _SYNC_IN_PROGRESS = False
 
 
 def _preset_path() -> Path:
-    return Path(__file__).with_name("mtoon_preset.blend")
+    return Path(__file__).with_name("preset.blend")
 
 
 def _is_shader_group_node(node: Node) -> bool:
@@ -87,6 +91,64 @@ def is_mtoon_material(material: Optional[Material]) -> bool:
     # The exact native output group is a strong compatibility fallback and also
     # keeps the add-on testable without importing VRM Add-on internals.
     return _find_official_output_node(material) is not None
+
+
+def _alpha_mode_requires_blended_render(alpha_mode: object) -> bool:
+    # VRM Add-on stores the identifiers as BLEND and MASK. Accept their UI
+    # labels as well so migrated/custom property data remains compatible.
+    return str(alpha_mode).strip().upper() in {
+        "BLEND",
+        "MASK",
+        "TRANSPARENT",
+        "CUTOUT",
+    }
+
+
+def _mtoon_uses_alpha_blend(
+    material: Material,
+    official_node: Optional[Node] = None,
+) -> bool:
+    """Return whether this MToon material is intended to use alpha blending."""
+    extension = getattr(material, "vrm_addon_extension", None)
+    mtoon1 = getattr(extension, "mtoon1", None)
+    if mtoon1 is not None:
+        try:
+            if bool(mtoon1.enabled) and not bool(mtoon1.is_outline_material):
+                return _alpha_mode_requires_blended_render(mtoon1.alpha_mode)
+        except (AttributeError, ReferenceError, RuntimeError, TypeError):
+            pass
+
+    # Compatibility fallback for older/imported transparent MToon node layouts
+    # and for files opened without the VRM property group currently registered.
+    if official_node is None:
+        official_node = _find_official_output_node(material)
+    if official_node is None:
+        return False
+    lit_color = official_node.inputs.get("Lit Color")
+    if lit_color is None:
+        return False
+    try:
+        return float(lit_color.default_value[3]) < 0.999999
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
+
+
+def _set_blended_render_method(
+    material: Material,
+    official_node: Optional[Node] = None,
+) -> bool:
+    if not _mtoon_uses_alpha_blend(material, official_node):
+        return False
+
+    # Blender 5.x exposes Eevee's Render Method through this property.
+    if hasattr(material, "surface_render_method"):
+        material.surface_render_method = "BLENDED"
+    # Compatibility fallback for Blender versions before surface_render_method.
+    elif hasattr(material, "blend_method"):
+        material.blend_method = "BLEND"
+    else:
+        return False
+    return True
 
 
 def _selected_mtoon_materials(context: Context) -> list[Material]:
@@ -465,6 +527,65 @@ def _sync_parameter_values(
             continue
 
 
+def _apply_shadow_mix_once(
+    material: Material,
+    official_node: Node,
+    shadow_mix: float,
+) -> None:
+    """Bake Shadow Mix into the native MToon UI value exactly once."""
+
+    factor = max(0.0, min(1.0, float(shadow_mix)))
+    extension = getattr(material, "vrm_addon_extension", None)
+    mtoon1 = getattr(extension, "mtoon1", None)
+    extensions = getattr(mtoon1, "extensions", None)
+    mtoon = getattr(extensions, "vrmc_materials_mtoon", None)
+    if mtoon is not None and hasattr(mtoon, "shade_color_factor"):
+        try:
+            color = tuple(float(value) for value in mtoon.shade_color_factor)
+            if len(color) >= 3:
+                mtoon.shade_color_factor = tuple(
+                    component * factor for component in color[:3]
+                )
+                return
+        except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+            pass
+
+    # Compatibility fallback for imported/custom MToon node layouts and tests
+    # that do not have the VRM Add-on PropertyGroup attached.
+    socket = official_node.inputs.get("Shade Color")
+    if socket is None or not hasattr(socket, "default_value"):
+        return
+    try:
+        color = tuple(socket.default_value)
+        if len(color) >= 4:
+            socket.default_value = (
+                color[0] * factor,
+                color[1] * factor,
+                color[2] * factor,
+                color[3],
+            )
+    except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+        pass
+
+
+def _migrate_legacy_shadow_mix(
+    material: Material,
+    official_node: Node,
+) -> bool:
+    node_tree = material.node_tree
+    if node_tree is None or LEGACY_SHADOW_MIX_KEY not in node_tree:
+        return False
+    try:
+        factor = float(node_tree.get(LEGACY_SHADOW_MIX_KEY, 0.5))
+        _apply_shadow_mix_once(material, official_node, factor)
+    finally:
+        try:
+            del node_tree[LEGACY_SHADOW_MIX_KEY]
+        except (KeyError, ReferenceError, RuntimeError):
+            pass
+    return True
+
+
 def _sync_material(material: Material) -> None:
     node_tree = material.node_tree
     if node_tree is None or not bool(node_tree.get(GROUP_TAG_KEY)):
@@ -475,11 +596,15 @@ def _sync_material(material: Material) -> None:
     created_nodes = [
         node for node in node_tree.nodes if bool(node.get(NODE_TAG_KEY))
     ]
+    migrated = _migrate_legacy_shadow_mix(material, official_node)
     _sync_parameter_values(node_tree, official_node, created_nodes)
+    if migrated:
+        # Setting the native MToon UI value can let VRM Add-on reactivate its
+        # own output. Migration ends by restoring Yugo's custom output once.
+        _activate_custom_output(node_tree, created_nodes)
 
 
-@persistent
-def _sync_installed_materials(_scene: object, _depsgraph: object) -> None:
+def _sync_installed_materials(_scene: object = None, _depsgraph: object = None) -> None:
     global _SYNC_IN_PROGRESS
     if _SYNC_IN_PROGRESS:
         return
@@ -489,6 +614,22 @@ def _sync_installed_materials(_scene: object, _depsgraph: object) -> None:
             _sync_material(material)
     finally:
         _SYNC_IN_PROGRESS = False
+
+
+def _system_update(_context, _delta_time) -> None:
+    _sync_installed_materials()
+
+
+def _remove_legacy_depsgraph_handlers() -> None:
+    """Remove MToon callbacks left by Yugo 0.1.22 or a script reload."""
+
+    handlers = bpy.app.handlers.depsgraph_update_post
+    for handler in tuple(handlers):
+        if (
+            getattr(handler, "__module__", "") == __name__
+            and getattr(handler, "__name__", "") == "_sync_installed_materials"
+        ):
+            handlers.remove(handler)
 
 
 def _activate_custom_output(target_tree: NodeTree, created_nodes: list[Node]) -> Node:
@@ -523,13 +664,26 @@ def _rename_material(material: Material) -> None:
     material.name = base_name + CUSTOM_SUFFIX
 
 
-def install_custom_shader(material: Material, template: Material) -> None:
+def install_custom_shader(
+    material: Material,
+    template: Material,
+    shadow_mix: float = 0.5,
+) -> None:
     if material.node_tree is None or template.node_tree is None:
         raise RuntimeError("Material node tree is unavailable")
 
     official_node = _find_official_output_node(material)
     if official_node is None:
         raise RuntimeError("Native VRM MToon output group was not found")
+
+    _set_blended_render_method(material, official_node)
+
+    already_installed = bool(material.node_tree.get(GROUP_TAG_KEY))
+    if not _migrate_legacy_shadow_mix(material, official_node) and not already_installed:
+        # Shadow Mix is an Optimize-time preprocessing step. Apply it to the
+        # native MToon value before copying any custom nodes, then never read
+        # the operator value from the per-frame/depsgraph synchronization path.
+        _apply_shadow_mix_once(material, official_node, shadow_mix)
 
     _node_map, created_nodes = _clone_custom_nodes(
         template.node_tree,
@@ -542,7 +696,10 @@ def install_custom_shader(material: Material, template: Material) -> None:
     material.node_tree.update_tag()
 
 
-def optimize_selected_mtoon_materials(context: Context) -> tuple[int, list[str]]:
+def optimize_selected_mtoon_materials(
+    context: Context,
+    shadow_mix: float = 0.5,
+) -> tuple[int, list[str]]:
     materials = _selected_mtoon_materials(context)
     if not materials:
         return 0, ["No MToon materials were found on selected objects"]
@@ -553,7 +710,7 @@ def optimize_selected_mtoon_materials(context: Context) -> tuple[int, list[str]]
     try:
         for material in materials:
             try:
-                install_custom_shader(material, template)
+                install_custom_shader(material, template, shadow_mix)
                 optimized += 1
             except Exception as exc:  # Keep processing the other selected materials.
                 errors.append(f"{material.name}: {exc}")
@@ -567,10 +724,10 @@ def optimize_selected_mtoon_materials(context: Context) -> tuple[int, list[str]]
 
 
 def register() -> None:
-    if _sync_installed_materials not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_sync_installed_materials)
+    _remove_legacy_depsgraph_handlers()
+    scheduler.add_system("mtoon", _system_update, priority=100)
 
 
 def unregister() -> None:
-    if _sync_installed_materials in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_sync_installed_materials)
+    scheduler.remove_system("mtoon")
+    _remove_legacy_depsgraph_handlers()

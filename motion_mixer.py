@@ -7,11 +7,11 @@ import time
 import bpy
 from mathutils import Quaternion, Vector
 
-from . import blender_action
+from . import blender_action, scheduler
 from .state import ensure_runtime_id, iter_avatars, layers_for_armature
 
 
-APPLY_INTERVAL = 1.0 / 60.0
+APPLY_INTERVAL = scheduler.MOTION_INTERVAL
 ROTATION_DOT_EPSILON = 1.0e-10
 LOCATION_EPSILON_SQUARED = 1.0e-12
 POST_APPLY_CALLBACKS_KEY = "yugo.motion_mixer.post_apply_callbacks"
@@ -23,28 +23,33 @@ _last_root_armatures = set()
 _armatures = {}
 _last_apply_time = 0.0
 _undo_in_progress = False
+_post_apply_registry = {}
+_post_callback_error_times = {}
 
 
 def _ensure_post_apply_registry():
     namespace = bpy.app.driver_namespace
-    if not isinstance(namespace.get(POST_APPLY_CALLBACKS_KEY), dict):
-        namespace[POST_APPLY_CALLBACKS_KEY] = {}
+    exposed = namespace.get(POST_APPLY_CALLBACKS_KEY)
+    if isinstance(exposed, dict) and exposed is not _post_apply_registry:
+        # Preserve callbacks installed through the legacy public namespace,
+        # including the standalone Spring preview integration.
+        _post_apply_registry.update(exposed)
+    namespace[POST_APPLY_CALLBACKS_KEY] = _post_apply_registry
     namespace[MIXER_ACTIVE_KEY] = True
 
 
 def _post_apply_callbacks(delta_time=APPLY_INTERVAL):
-    callbacks = bpy.app.driver_namespace.get(POST_APPLY_CALLBACKS_KEY)
-    if not isinstance(callbacks, dict):
-        return
-    for name, callback in tuple(callbacks.items()):
+    for name, callback in tuple(_post_apply_registry.items()):
         if not callable(callback):
-            callbacks.pop(name, None)
+            _post_apply_registry.pop(name, None)
             continue
         try:
             callback(bpy.context, delta_time)
         except Exception as error:
-            callbacks.pop(name, None)
-            print(f'Yugo post-mix callback "{name}" stopped: {error}')
+            now = time.monotonic()
+            if now - _post_callback_error_times.get(name, 0.0) >= 2.0:
+                _post_callback_error_times[name] = now
+                print(f'Yugo post-mix callback "{name}" will retry: {error}')
 
 
 def submit_layer_pose(layer, armature, bones=None, root=None):
@@ -278,6 +283,10 @@ def _apply_timer():
     return APPLY_INTERVAL
 
 
+def _motion_update(_context, _delta_time):
+    _apply_timer()
+
+
 def prepare_undo():
     global _undo_in_progress
     _undo_in_progress = True
@@ -324,17 +333,30 @@ def clear_all():
     _undo_in_progress = False
 
 
+def discard_all():
+    """Drop runtime references without touching RNA that Blender is replacing."""
+
+    global _last_apply_time, _undo_in_progress
+    _live_poses.clear()
+    _last_driven_bones.clear()
+    _last_root_armatures.clear()
+    _armatures.clear()
+    blender_action.clear_all()
+    _last_apply_time = 0.0
+    _undo_in_progress = False
+
+
 def register():
+    _post_apply_registry.clear()
+    _post_callback_error_times.clear()
     _ensure_post_apply_registry()
-    if not bpy.app.timers.is_registered(_apply_timer):
-        bpy.app.timers.register(_apply_timer, first_interval=0.0, persistent=True)
+    scheduler.add_motion("motion_mixer", _motion_update, priority=1000)
 
 
 def unregister():
+    scheduler.remove_motion("motion_mixer")
     bpy.app.driver_namespace.pop(MIXER_ACTIVE_KEY, None)
-    try:
-        if bpy.app.timers.is_registered(_apply_timer):
-            bpy.app.timers.unregister(_apply_timer)
-    except ValueError:
-        pass
+    bpy.app.driver_namespace.pop(POST_APPLY_CALLBACKS_KEY, None)
+    _post_apply_registry.clear()
+    _post_callback_error_times.clear()
     clear_all()

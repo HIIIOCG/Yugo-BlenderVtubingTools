@@ -180,14 +180,15 @@ def main():
         assert not extension_by_name[armature_a.name].spring_bone1.enable_animation
         assert not extension_by_name[armature_b.name].spring_bone1.enable_animation
 
-        # Auto resolves to a per-layer 24 FPS solver. A mixer tick between
-        # solves must still advance the displayed quaternion through SLERP.
+        # Auto resolves to a 24 FPS Blender-pose sync. Internal physics still
+        # advances at 60 Hz, while ticks between snapshots display SLERP.
         layer_b.enabled = False
         target_a = runtime._targets[layer_a.runtime_id]
         assert layer_a.spring_physics_rate == "AUTO"
         assert target_a.resolved_physics_fps() == 24
         runtime.reset(layer_a)
         calls_before = solve_calls[armature_a.name]
+        updates_before = view_update_calls[0]
         original_output_write = runtime._set_rotation_without_mode_change
         write_attempts = []
 
@@ -214,7 +215,8 @@ def main():
             )
         finally:
             runtime._set_rotation_without_mode_change = original_output_write
-        assert solve_calls[armature_a.name] == calls_before + 1
+        assert solve_calls[armature_a.name] == calls_before + 2
+        assert view_update_calls[0] == updates_before + 1
         assert second_angle > first_angle
         # The buffered solver never writes an un-interpolated physics pose to
         # Blender. Each display tick has at most one output attempt per joint.
@@ -274,8 +276,9 @@ def main():
         assert partial_weight_captures == full_weight_captures + 1
         target_a.capture_rotations = original_capture
 
-        # Explicit rates keep their own cadence. 60 solves every mixer tick;
-        # 12 performs one initial solve, then waits five 60 Hz ticks.
+        # Explicit rates keep their own pose-sync cadence while physics itself
+        # advances at a fixed 60 Hz. A 12 FPS snapshot rate therefore still
+        # performs one internal Verlet step on each mixer tick.
         calls_before = solve_calls[armature_a.name]
         layer_a.spring_physics_rate = "FPS_60"
         target_a.reset_output_state()
@@ -287,9 +290,59 @@ def main():
         target_a.reset_output_state()
         for _index in range(4):
             runtime._post_mix_update(bpy.context, runtime.TICK_INTERVAL)
-        assert solve_calls[armature_a.name] == calls_before + 1
+        assert solve_calls[armature_a.name] == calls_before + 4
         runtime._post_mix_update(bpy.context, runtime.TICK_INTERVAL)
-        assert solve_calls[armature_a.name] == calls_before + 2
+        assert solve_calls[armature_a.name] == calls_before + 5
+
+        # A slow Blender frame must not trigger multiple catch-up solves. That
+        # feedback loop caused 60 FPS mode to fall from about 30 to 21 FPS.
+        layer_a.spring_physics_rate = "FPS_60"
+        target_a.reset_output_state()
+        assert target_a.advance_physics_clock(1.0 / 20.0)[2] == 1
+
+        # Every selectable low sync rate advances the same sixty fixed Verlet
+        # steps per second and reaches the same internal tail state as 60 FPS
+        # under identical input. Lower rates must not make Spring motion limp.
+        def tail_signature():
+            return tuple(
+                tuple(pair.current_tail)
+                for spring in target_a.solver.springs
+                for chain in spring.chains
+                for pair in chain.pairs
+            )
+
+        layer_a.spring_physics_rate = "FPS_60"
+        runtime.reset(layer_a)
+        calls_before = solve_calls[armature_a.name]
+        for _index in range(60):
+            runtime._post_mix_update(bpy.context, runtime.TICK_INTERVAL)
+        assert solve_calls[armature_a.name] == calls_before + 60
+        sixty_fps_tails = tail_signature()
+
+        for rate in (
+            "FPS_8",
+            "FPS_12",
+            "FPS_14",
+            "FPS_16",
+            "FPS_24",
+            "FPS_30",
+        ):
+            layer_a.spring_physics_rate = rate
+            runtime.reset(layer_a)
+            calls_before = solve_calls[armature_a.name]
+            for _index in range(60):
+                runtime._post_mix_update(bpy.context, runtime.TICK_INTERVAL)
+            assert solve_calls[armature_a.name] == calls_before + 60, (
+                rate,
+                solve_calls[armature_a.name] - calls_before,
+            )
+            low_rate_tails = tail_signature()
+            assert len(low_rate_tails) == len(sixty_fps_tails)
+            assert all(
+                sum((left - right) ** 2 for left, right in zip(low, sixty))
+                <= 1.0e-10
+                for low, sixty in zip(low_rate_tails, sixty_fps_tails)
+            ), rate
 
         layer_a.spring_physics_rate = "AUTO"
         layer_a.weight = 1.0

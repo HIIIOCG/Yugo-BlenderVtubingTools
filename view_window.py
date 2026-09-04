@@ -4,9 +4,11 @@ import math
 
 import bpy
 
+from . import scheduler
+
 
 _VIEW_WINDOWS = {}
-_UPDATE_INTERVAL = 1.0 / 30.0
+_UPDATE_INTERVAL = scheduler.SYSTEM_INTERVAL
 
 
 def _view_area(window):
@@ -44,7 +46,13 @@ def camera_cover_zoom(region_width, region_height, scene):
     return max(-30.0, min(600.0, zoom))
 
 
-def configure_view_space(space, scene, shading_type, region) -> None:
+def configure_view_space(
+    space,
+    scene,
+    shading_type,
+    compositor_mode,
+    region,
+) -> None:
     space.show_region_header = False
     space.show_region_toolbar = False
     space.show_region_ui = False
@@ -53,6 +61,7 @@ def configure_view_space(space, scene, shading_type, region) -> None:
     space.show_gizmo = False
     space.overlay.show_overlays = False
     space.shading.type = shading_type
+    space.shading.use_compositor = compositor_mode
 
     camera = scene.camera
     if camera is not None and getattr(camera, "type", "") == "CAMERA":
@@ -73,7 +82,7 @@ def configure_view_space(space, scene, shading_type, region) -> None:
             space.region_3d.view_perspective = "PERSP"
 
 
-def _window_signature(window, scene, shading_type):
+def _window_signature(window, scene, shading_type, compositor_mode):
     area = _view_area(window)
     region = _window_region(area)
     camera = scene.camera
@@ -88,13 +97,38 @@ def _window_signature(window, scene, shading_type):
         render.pixel_aspect_x,
         render.pixel_aspect_y,
         shading_type,
+        compositor_mode,
     )
 
 
-def configure_view_window(window, scene, shading_type, *, force=False) -> None:
+def _restore_locked_workspace(window, state) -> bool:
+    if state is None:
+        return False
+    workspace = state.get("workspace")
+    if workspace is None or window.workspace == workspace:
+        return False
+    window.workspace = workspace
+    state["signature"] = None
+    return True
+
+
+def configure_view_window(
+    window,
+    scene,
+    shading_type,
+    compositor_mode="ALWAYS",
+    *,
+    force=False,
+) -> None:
     pointer = window.as_pointer()
     state = _VIEW_WINDOWS.get(pointer)
-    signature = _window_signature(window, scene, shading_type)
+    _restore_locked_workspace(window, state)
+    signature = _window_signature(
+        window,
+        scene,
+        shading_type,
+        compositor_mode,
+    )
     if not force and state is not None and state.get("signature") == signature:
         return
 
@@ -103,7 +137,13 @@ def configure_view_window(window, scene, shading_type, *, force=False) -> None:
     space = area.spaces.active
     if space is None:
         raise RuntimeError("The No UI Window 3D Viewport is not ready")
-    configure_view_space(space, scene, shading_type, _window_region(area))
+    configure_view_space(
+        space,
+        scene,
+        shading_type,
+        compositor_mode,
+        _window_region(area),
+    )
     if state is not None:
         state["signature"] = signature
     area.tag_redraw()
@@ -122,7 +162,17 @@ def _update_view_windows():
                 continue
             scene = window.scene
             shading_type = getattr(scene, "yugo_view_shading", "RENDERED")
-            configure_view_window(window, scene, shading_type)
+            compositor_mode = getattr(
+                scene,
+                "yugo_view_compositor",
+                "ALWAYS",
+            )
+            configure_view_window(
+                window,
+                scene,
+                shading_type,
+                compositor_mode,
+            )
     except (AttributeError, ReferenceError, RuntimeError):
         # UI data can be briefly unavailable while Blender closes a window.
         pass
@@ -130,11 +180,19 @@ def _update_view_windows():
 
 
 def _ensure_update_timer():
-    if not bpy.app.timers.is_registered(_update_view_windows):
-        bpy.app.timers.register(_update_view_windows, first_interval=0.0)
+    # The shared 2 Hz system scheduler is always active while Yugo is enabled.
+    return None
 
 
-def open_view_window(context, shading_type="RENDERED"):
+def _system_update(_context, _delta_time):
+    _update_view_windows()
+
+
+def open_view_window(
+    context,
+    shading_type="RENDERED",
+    compositor_mode="ALWAYS",
+):
     if context.window is None or context.area is None:
         raise RuntimeError("No UI Window must be opened from a Blender window")
     if context.area.type != "VIEW_3D":
@@ -175,11 +233,15 @@ def open_view_window(context, shading_type="RENDERED"):
             bpy.ops.screen.screen_full_area(use_hide_panels=True)
 
     pointer = new_window.as_pointer()
-    _VIEW_WINDOWS[pointer] = {"signature": None}
+    _VIEW_WINDOWS[pointer] = {
+        "signature": None,
+        "workspace": new_window.workspace,
+    }
     configure_view_window(
         new_window,
         new_window.scene,
         shading_type,
+        compositor_mode,
         force=True,
     )
     _ensure_update_timer()
@@ -204,6 +266,11 @@ def open_view_window(context, shading_type="RENDERED"):
                     current,
                     current.scene,
                     getattr(current.scene, "yugo_view_shading", shading_type),
+                    getattr(
+                        current.scene,
+                        "yugo_view_compositor",
+                        compositor_mode,
+                    ),
                     force=True,
                 )
         except (AttributeError, ReferenceError, RuntimeError):
@@ -215,13 +282,9 @@ def open_view_window(context, shading_type="RENDERED"):
 
 
 def register():
-    pass
+    scheduler.add_system("view_window", _system_update, priority=200)
 
 
 def unregister():
+    scheduler.remove_system("view_window")
     _VIEW_WINDOWS.clear()
-    try:
-        if bpy.app.timers.is_registered(_update_view_windows):
-            bpy.app.timers.unregister(_update_view_windows)
-    except ValueError:
-        pass

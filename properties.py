@@ -500,12 +500,19 @@ class YUGO_PG_motion_layer(bpy.types.PropertyGroup):
     )
     spring_physics_rate: bpy.props.EnumProperty(
         name="Physics Rate",
-        description="Spring Bone solve frequency; Auto uses 24 FPS",
+        description=(
+            "Spring Bone pose-sync frequency; all rates use the same fixed "
+            "1/60-second physics step without catch-up solves"
+        ),
         items=(
-            ("AUTO", "Auto (24 FPS)", "Use a 24 FPS solve rate with 60 Hz SLERP output"),
-            ("FPS_60", "60 FPS", "Solve Spring Bone on every Yugo mixer update"),
-            ("FPS_24", "24 FPS", "Solve at 24 FPS with 60 Hz SLERP output"),
-            ("FPS_12", "12 FPS", "Solve at 12 FPS with 60 Hz SLERP output"),
+            ("AUTO", "Auto (24 FPS)", "Sync at 24 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_60", "60 FPS", "Sync Spring Bone on every Yugo mixer update"),
+            ("FPS_30", "30 FPS", "Sync at 30 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_24", "24 FPS", "Sync at 24 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_16", "16 FPS", "Sync at 16 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_14", "14 FPS", "Sync at 14 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_12", "12 FPS", "Sync at 12 FPS with fixed 1/60 physics steps and SLERP output"),
+            ("FPS_8", "8 FPS", "Sync at 8 FPS with fixed 1/60 physics steps and SLERP output"),
         ),
         default="AUTO",
     )
@@ -552,10 +559,47 @@ def avatar_index_updated(scene, _context):
     _sync_selected_armature(scene)
 
 
-def avatar_armature_updated(_avatar, context):
+_COMPOSING_MEMBERSHIP_UPDATE_IN_PROGRESS = False
+
+
+def avatar_composing_enabled_updated(avatar, context):
+    global _COMPOSING_MEMBERSHIP_UPDATE_IN_PROGRESS
+    if _COMPOSING_MEMBERSHIP_UPDATE_IN_PROGRESS:
+        return
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+
+    _COMPOSING_MEMBERSHIP_UPDATE_IN_PROGRESS = True
+    try:
+        from .composing import runtime
+
+        runtime.set_avatar_enabled(
+            scene,
+            avatar,
+            bool(avatar.composing_enabled),
+            context,
+        )
+        settings = getattr(scene, "yugo_composing", None)
+        if settings is not None:
+            settings.last_error = ""
+    except Exception as error:
+        settings = getattr(scene, "yugo_composing", None)
+        if settings is not None:
+            settings.last_error = str(error)
+        if avatar.composing_enabled:
+            avatar.composing_enabled = False
+        print("Yugo Composing:", error)
+    finally:
+        _COMPOSING_MEMBERSHIP_UPDATE_IN_PROGRESS = False
+
+
+def avatar_armature_updated(avatar, context):
     scene = getattr(context, "scene", None)
     if scene is not None:
         _sync_selected_armature(scene)
+        if avatar.composing_enabled:
+            avatar_composing_enabled_updated(avatar, context)
 
 
 def _copy_property_group(source, target):
@@ -602,6 +646,12 @@ def _migrate_legacy_scene_data():
 
 class YUGO_PG_avatar(bpy.types.PropertyGroup):
     runtime_id: bpy.props.StringProperty(default="", options={"HIDDEN"})
+    composing_enabled: bpy.props.BoolProperty(
+        name="Enable YugoComp",
+        description="Include this character's meshes in the shared YugoComp matte",
+        default=False,
+        update=avatar_composing_enabled_updated,
+    )
     armature: bpy.props.PointerProperty(
         name="VRM Armature",
         description="VRM avatar driven by this independent Motion Layer stack",
@@ -685,6 +735,16 @@ def register():
         ),
         default="RENDERED",
     )
+    bpy.types.Scene.yugo_view_compositor = bpy.props.EnumProperty(
+        name="Compositor Mode",
+        description="Viewport compositor mode used by No UI Window",
+        items=(
+            ("DISABLED", "Disabled", "Disable viewport compositor output"),
+            ("CAMERA", "Camera", "Use compositor output in camera view"),
+            ("ALWAYS", "Always", "Always use viewport compositor output"),
+        ),
+        default="ALWAYS",
+    )
     if not bpy.app.timers.is_registered(_migrate_legacy_scene_data):
         bpy.app.timers.register(
             _migrate_legacy_scene_data, first_interval=0.0, persistent=False
@@ -697,6 +757,7 @@ def unregister():
             bpy.app.timers.unregister(_migrate_legacy_scene_data)
     except ValueError:
         pass
+    del bpy.types.Scene.yugo_view_compositor
     del bpy.types.Scene.yugo_view_shading
     del bpy.types.Scene.yugo_ui_preset
     del bpy.types.Scene.yugo_ui_language

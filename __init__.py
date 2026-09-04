@@ -1,17 +1,21 @@
 bl_info = {
     "name": "Yugo",
-    "author": "ShenDeng",
-    "version": (0, 1, 14),
+    "author": "Yugo Contributors",
+    "version": (0, 1, 26),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > Yugo",
-    "description": "Layered motion mixing UI for VRM avatars",
+    "description": "Layered motion, camera control, and compositing for VRM avatars",
     "category": "Animation",
 }
 
 from . import (
+    scheduler,
+    camera,
+    composing,
     ifacialmocap,
     keybinds,
     mtoon_optimize,
+    outline_bake,
     motion_mixer,
     operators,
     panels,
@@ -25,8 +29,11 @@ from . import (
 
 
 MODULES = (
+    scheduler,
     properties,
+    composing,
     mtoon_optimize,
+    outline_bake,
     motion_mixer,
     ifacialmocap,
     vmc,
@@ -37,6 +44,7 @@ MODULES = (
     operators,
     ui_lists,
     panels,
+    camera,
 )
 
 

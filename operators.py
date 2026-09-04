@@ -4,7 +4,7 @@ from .blendshape_mask import refresh_layer_mask
 from .ifacialmocap import runtime as ifacialmocap_runtime
 from .keybinds import runtime as keybinds_runtime
 from .keybinds.vrm import iter_expressions as iter_keybind_expressions
-from . import motion_mixer, mtoon_optimize
+from . import motion_mixer, mtoon_optimize, object_optimize, outline_bake
 from .properties import SOURCE_TYPES
 from .state import active_armature, active_avatar, active_layers, ensure_runtime_id
 from .springbone import runtime as springbone_runtime
@@ -177,6 +177,7 @@ class YUGO_OT_view_window_settings(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(context.scene, "yugo_view_shading")
+        layout.prop(context.scene, "yugo_view_compositor")
 
     def execute(self, _context):
         return {"FINISHED"}
@@ -194,7 +195,11 @@ class YUGO_OT_view_window(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         try:
-            open_view_window(context, scene.yugo_view_shading)
+            open_view_window(
+                context,
+                scene.yugo_view_shading,
+                scene.yugo_view_compositor,
+            )
         except Exception as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
@@ -214,14 +219,44 @@ class YUGO_OT_optimize(bpy.types.Operator):
         description="Install Yugo's custom MToon preview shader",
         default=True,
     )
-    use_modifiers: bpy.props.BoolProperty(
-        name="Modifier",
-        description="Modifier optimization is reserved for a future version",
-        default=False,
+    shadow_mix: bpy.props.FloatProperty(
+        name="Shadow Mix",
+        description="Multiply the MToon Shade Color RGB value",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
     )
     use_mesh: bpy.props.BoolProperty(
         name="Mesh",
-        description="Mesh optimization is reserved for a future version",
+        description="Merge nearby vertices, then decimate the mesh geometry",
+        default=True,
+    )
+    merge_distance: bpy.props.FloatProperty(
+        name="Merge by Distance",
+        description="Distance used to merge duplicate vertices",
+        default=0.0001,
+        min=0.0,
+        soft_max=0.01,
+        precision=6,
+        subtype="DISTANCE",
+    )
+    decimate_ratio: bpy.props.FloatProperty(
+        name="Decimate Ratio",
+        description="Ratio used by Blender's direct Decimate Geometry operation",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    use_outline_to_mesh: bpy.props.BoolProperty(
+        name="Outline to Mesh",
+        description="Bake selected VRM MToon outline previews into separate meshes",
+        default=True,
+    )
+    use_collection_arrange: bpy.props.BoolProperty(
+        name="Collection Arrange",
+        description="Arrange the active VRM avatar into Yugo collections",
         default=False,
     )
     selected_count: bpy.props.IntProperty(options={"HIDDEN", "SKIP_SAVE"})
@@ -239,28 +274,92 @@ class YUGO_OT_optimize(bpy.types.Operator):
         summary.label(text=f"MToon Materials: {self.mtoon_count}", icon="MATERIAL")
         layout.separator()
         layout.prop(self, "use_mtoon")
-        layout.prop(self, "use_modifiers")
+        mtoon_settings = layout.column(align=True)
+        mtoon_settings.enabled = self.use_mtoon
+        mtoon_settings.prop(self, "shadow_mix", slider=True)
+
         layout.prop(self, "use_mesh")
+        mesh_settings = layout.column(align=True)
+        mesh_settings.enabled = self.use_mesh
+        mesh_settings.prop(self, "merge_distance")
+        mesh_settings.prop(self, "decimate_ratio", slider=True)
+
+        layout.prop(self, "use_outline_to_mesh")
+        layout.prop(self, "use_collection_arrange")
 
     def execute(self, context):
-        if not self.use_mtoon:
+        performed = False
+        summaries = []
+        errors = []
+
+        # 1. MToon
+        if self.use_mtoon:
+            optimized, mtoon_errors = mtoon_optimize.optimize_selected_mtoon_materials(
+                context,
+                self.shadow_mix,
+            )
+            if optimized:
+                performed = True
+                summaries.append(f"MToon {optimized}")
+            errors.extend(mtoon_errors)
+
+        # 2. Mesh: merge first, then decimate.
+        if self.use_mesh:
+            mesh_result = object_optimize.optimize_selected_meshes(
+                context,
+                self.merge_distance,
+                self.decimate_ratio,
+            )
+            if mesh_result.merged_objects or mesh_result.decimated_objects:
+                performed = True
+                summaries.append(
+                    f"Mesh {mesh_result.merged_objects} merged / "
+                    f"{mesh_result.decimated_objects} decimated"
+                )
+            errors.extend(mesh_result.errors)
+
+        # 3. Outline to Mesh
+        if self.use_outline_to_mesh:
+            try:
+                outlines, outline_errors = outline_bake.apply_selected_outlines(
+                    context
+                )
+                if outlines:
+                    performed = True
+                    summaries.append(f"Outline {len(outlines)}")
+                errors.extend(outline_errors)
+            except Exception as error:
+                errors.append(f"Outline to Mesh: {error}")
+
+        # 4. Collection Arrange
+        if self.use_collection_arrange:
+            try:
+                collection_result = object_optimize.arrange_avatar_collections(
+                    context,
+                    active_armature(context.scene),
+                )
+                performed = True
+                summaries.append(
+                    f"Collections {collection_result.related_objects} objects"
+                )
+            except Exception as error:
+                errors.append(f"Collection Arrange: {error}")
+
+        if not performed and not errors:
             self.report({"INFO"}, "No implemented optimize option was selected")
             return {"FINISHED"}
 
-        optimized, errors = mtoon_optimize.optimize_selected_mtoon_materials(context)
-        if optimized == 0:
-            self.report({"WARNING"}, errors[0] if errors else "Nothing was optimized")
-            return {"CANCELLED"}
         if errors:
             self.report(
                 {"WARNING"},
-                f"Optimized {optimized} MToon material(s); {len(errors)} failed",
+                ("; ".join(summaries) + "; " if summaries else "")
+                + f"{len(errors)} warning(s)",
             )
             for error in errors:
-                print("Yugo MToon Optimize:", error)
+                print("Yugo Optimize:", error)
         else:
-            self.report({"INFO"}, f"Optimized {optimized} MToon material(s)")
-        return {"FINISHED"}
+            self.report({"INFO"}, "; ".join(summaries))
+        return {"FINISHED"} if performed else {"CANCELLED"}
 
 
 def active_layer(scene):
@@ -312,6 +411,8 @@ class YUGO_OT_avatar_remove(bpy.types.Operator):
         scene = context.scene
         index = scene.yugo_avatar_index
         avatar = scene.yugo_avatars[index]
+        if avatar.composing_enabled:
+            avatar.composing_enabled = False
         for layer in tuple(avatar.motion_layers):
             if ifacialmocap_runtime.is_layer_running(layer):
                 ifacialmocap_runtime.stop(layer)
@@ -535,9 +636,6 @@ class YUGO_OT_connection_toggle(bpy.types.Operator):
     def modal(self, _context, event):
         if not keybinds_runtime.owns(self):
             return {"CANCELLED"}
-        if event.type == "TIMER":
-            keybinds_runtime.tick()
-            return {"PASS_THROUGH"}
         if keybinds_runtime.process_event(event):
             return {"RUNNING_MODAL"}
         return {"PASS_THROUGH"}

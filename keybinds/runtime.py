@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from .. import scheduler
 from ..state import (
     active_armature,
     find_avatar_for_layer,
@@ -14,11 +15,8 @@ from .logic import eased_value, expression_mask_type, key_matches, normalize_exp
 from .vrm import expression_lookup
 
 
-TICK_INTERVAL = 1.0 / 60.0
-
 _operator = None
 _window_manager = None
-_timer = None
 _targets = {}
 _last_tick = 0.0
 _last_redraw_time = 0.0
@@ -272,12 +270,13 @@ class _Target:
         except ReferenceError:
             pass
 
-    def close(self):
-        self.reset_expressions()
-        try:
-            self.layer.connected = False
-        except ReferenceError:
-            pass
+    def close(self, *, reset=True):
+        if reset:
+            self.reset_expressions()
+            try:
+                self.layer.connected = False
+            except ReferenceError:
+                pass
         self.held_items.clear()
         self.triggered_items.clear()
         self.values.clear()
@@ -297,7 +296,7 @@ def is_layer_running(layer):
 
 
 def start(operator, context, layer):
-    global _operator, _window_manager, _timer, _last_tick
+    global _operator, _window_manager, _last_tick
     if is_layer_running(layer):
         raise RuntimeError("This Keybinds layer is already listening")
     armature = active_armature(context.scene)
@@ -311,7 +310,6 @@ def start(operator, context, layer):
     if _operator is None:
         _operator = operator
         _window_manager = context.window_manager
-        _timer = _window_manager.event_timer_add(TICK_INTERVAL, window=context.window)
         _last_tick = time.monotonic()
         context.window_manager.modal_handler_add(operator)
         return True
@@ -322,8 +320,8 @@ def owns(operator):
     return _operator is operator
 
 
-def stop(layer=None):
-    global _operator, _window_manager, _timer, _last_tick, _last_redraw_time
+def stop(layer=None, *, reset=True):
+    global _operator, _window_manager, _last_tick, _last_redraw_time
     if layer is not None:
         try:
             pointer = layer.as_pointer()
@@ -331,22 +329,16 @@ def stop(layer=None):
             return
         target = _targets.pop(pointer, None)
         if target is not None:
-            target.close()
+            target.close(reset=reset)
         if _targets:
             _redraw_view3d(force=True)
             return
     else:
         for target in tuple(_targets.values()):
-            target.close()
+            target.close(reset=reset)
         _targets.clear()
-    if _window_manager is not None and _timer is not None:
-        try:
-            _window_manager.event_timer_remove(_timer)
-        except (ReferenceError, RuntimeError, ValueError):
-            pass
     _operator = None
     _window_manager = None
-    _timer = None
     _last_tick = 0.0
     _last_redraw_time = 0.0
 
@@ -374,7 +366,7 @@ def binding_is_on(item):
 def _redraw_view3d(force=False):
     global _last_redraw_time
     now = time.monotonic()
-    if not force and now - _last_redraw_time < 0.1:
+    if not force and now - _last_redraw_time < scheduler.SYSTEM_INTERVAL:
         return
     _last_redraw_time = now
     if _window_manager is None:
@@ -439,9 +431,14 @@ def finish_undo():
         _undo_in_progress = False
 
 
+def _motion_update(_context, _delta_time):
+    tick()
+
+
 def register():
-    pass
+    scheduler.add_motion("keybinds", _motion_update, priority=300)
 
 
 def unregister():
+    scheduler.remove_motion("keybinds")
     stop()

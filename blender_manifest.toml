@@ -1,23 +1,20 @@
 schema_version = "1.0.0"
 id = "yugo"
-version = "0.1.14"
+version = "0.1.26"
 name = "Yugo"
-tagline = "Layered motion mixing UI for VRM avatars"
-maintainer = "ShenDeng"
+tagline = "Layered motion, camera control, and compositing for VRM avatars"
+maintainer = "Yugo Contributors"
 type = "add-on"
 
 blender_version_min = "5.1.0"
 license = [
   "SPDX:GPL-3.0-or-later",
 ]
-copyright = [
-  "2026 ShenDeng",
-]
 
 tags = ["Animation", "Rigging"]
 
 [permissions]
-network = "Receive VMC and iFacialMocap data over a local network"
+network = "Receive VMC and iFacialMocap motion data"
 
 [build]
 paths_exclude_pattern = [

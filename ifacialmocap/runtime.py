@@ -9,7 +9,7 @@ import time
 import bpy
 from mathutils import Quaternion
 
-from .. import motion_mixer
+from .. import motion_mixer, scheduler
 from ..blendshape_mask import (
     build_mask_lookup,
     iter_bound_expressions,
@@ -32,7 +32,7 @@ from .protocol import (
 )
 
 
-APPLY_INTERVAL = 1.0 / 60.0
+APPLY_INTERVAL = scheduler.MOTION_INTERVAL
 LISTEN_ADDRESS = "0.0.0.0"
 
 _state_lock = threading.Lock()
@@ -270,7 +270,7 @@ def _receiver_loop():
 def _redraw_view3d():
     global _last_redraw_time
     now = time.monotonic()
-    if now - _last_redraw_time < 0.25:
+    if now - _last_redraw_time < scheduler.SYSTEM_INTERVAL:
         return
     _last_redraw_time = now
     window_manager = getattr(bpy.context, "window_manager", None)
@@ -621,10 +621,6 @@ def _apply_active_target(blendshapes, head_rotation, frame_count, now, delta_tim
 def _apply_timer():
     global _last_apply_time
 
-    if not bpy.app.online_access:
-        stop(send_stop_command=False)
-        return None
-
     if _undo_in_progress:
         return APPLY_INTERVAL
 
@@ -726,11 +722,6 @@ def start(scene, layer, armature):
 
     if is_layer_running(layer):
         raise RuntimeError("This iFacialMocap layer is already connected")
-    if not bpy.app.online_access:
-        raise RuntimeError(
-            "Online access is disabled. Enable Allow Online Access in Blender "
-            "Preferences before starting iFacialMocap"
-        )
     if armature is None or getattr(armature, "type", "") != "ARMATURE":
         raise RuntimeError("Select a VRM Armature first")
 
@@ -795,10 +786,6 @@ def start(scene, layer, armature):
     _targets[target.layer_pointer] = target
     layer.connected = True
 
-    if not bpy.app.timers.is_registered(_apply_timer):
-        bpy.app.timers.register(_apply_timer, first_interval=0.0, persistent=True)
-
-
 def stop(layer=None, send_stop_command=True, reset_expressions=True):
     global _receiver_thread, _server_socket, _client_socket, _running
     global _connected, _peer_address, _latest_blendshapes, _latest_head_rotation
@@ -831,12 +818,7 @@ def stop(layer=None, send_stop_command=True, reset_expressions=True):
         client_socket = _client_socket
         receiver_thread = _receiver_thread
 
-    if (
-        send_stop_command
-        and was_running
-        and _device_address
-        and bpy.app.online_access
-    ):
+    if send_stop_command and was_running and _device_address:
         try:
             _send_device_command(_device_address, _device_port, STOP_COMMAND)
         except OSError as error:
@@ -862,12 +844,6 @@ def stop(layer=None, send_stop_command=True, reset_expressions=True):
                 target.layer.connected = False
             except ReferenceError:
                 pass
-    try:
-        if bpy.app.timers.is_registered(_apply_timer):
-            bpy.app.timers.unregister(_apply_timer)
-    except ValueError:
-        pass
-
     with _state_lock:
         _receiver_thread = None
         _server_socket = None
@@ -967,9 +943,14 @@ def finish_undo():
         _undo_in_progress = False
 
 
+def _motion_update(_context, _delta_time):
+    _apply_timer()
+
+
 def register():
-    pass
+    scheduler.add_motion("ifacialmocap", _motion_update, priority=200)
 
 
 def unregister():
+    scheduler.remove_motion("ifacialmocap")
     stop()
