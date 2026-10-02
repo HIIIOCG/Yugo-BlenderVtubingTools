@@ -35,12 +35,16 @@ class YUGUS_NODE_api_action(api.ActionNodeMixin, YUGUS_NodeBase, bpy.types.Node)
     def init(self, _context):
         self.init_action()
         self.inputs.new(SOCKET_TRIGGER, "Value")
+        self.inputs.new('YUGUS_NS_update_event', 'Command')
 
 
-started, updated, cancelled, retired = [], [], [], []
+started, updated, cancelled, retired, commands = [], [], [], [], []
 
 
 def start(context):
+    if context.input_name == 'Command':
+        commands.append(context.run_id)
+        return api.ActionResult.end()
     payload = context.payload
     started.append((context.run_id, payload))
     payload["nested"]["value"] = 999
@@ -70,13 +74,13 @@ def cancel(context, state, reason):
     cancelled.append((context.run_id, reason, context.node is None))
 
 
-def create_spec():
+def create_spec(policy_inputs=None):
     return api.ModuleSpec(
         "synthetic", label="Synthetic API",
         classes=(YUGUS_NODE_api_value, YUGUS_NODE_api_action),
         evaluators={YUGUS_NODE_api_value.bl_idname: lambda context, node: {"Value": node.value}},
         actions={YUGUS_NODE_api_action.bl_idname: api.ActionSpec(
-            start, update, cancel, configuration=lambda node: {
+            start, update, cancel, inputs=('Enter', 'Command'), policy_inputs=policy_inputs, configuration=lambda node: {
                 "seconds": node.seconds, "fail": node.fail, "bad": node.bad_state,
                 "target": api.object_ref(node.target) if node.target else None})},
         menu_entries=((YUGUS_NODE_api_value.bl_idname, "API Value"), (YUGUS_NODE_api_action.bl_idname, "API Action")),
@@ -87,10 +91,11 @@ def create_spec():
 
 with RestrictBlend():
     addon.register()
+    bundled_modules = api.registered_modules()
     api.register_module(create_spec())
-assert api.registered_modules() == ("synthetic",)
-assert api.menu_entries()[0][0] == "Synthetic API"
-assert api.card_entries()[0][0] == YUGUS_NODE_api_action.bl_idname
+assert api.registered_modules() == (*bundled_modules, "synthetic")
+assert ("Synthetic API", create_spec().menu_entries) in api.menu_entries()
+assert any(item[0] == YUGUS_NODE_api_action.bl_idname for item in api.card_entries())
 assert retired == [], "Module recovery read scene data during restricted registration"
 for spec in (create_spec(), api.ModuleSpec("missing_dependency", dependencies=("absent",))):
     try:
@@ -171,6 +176,23 @@ graph.action.seconds = 0
 rid = graph.fire()
 assert workflow.status(rid)["state"] == "end" and workflow.logs[-1]["state"] == "end"
 graph.close()
+
+api.unregister_module('synthetic')
+api.register_module(create_spec(policy_inputs=('Enter',)))
+for policy in ('IGNORE', 'RESTART'):
+    graph = Graph()
+    command = graph.tree.nodes.new('YUGUS_NODE_test_event')
+    graph.link(command, 'Trigger', graph.action, 'Command')
+    graph.action.busy_policy = policy
+    rid = graph.fire()
+    before_commands = len(commands)
+    control = flow.emit_event(graph.tree, command, 'Trigger', now=.1)
+    assert workflow.status(control)['state'] == 'end'
+    assert len(commands) == before_commands + 1
+    assert workflow.status(rid)['state'] == 'running', 'Command incorrectly applied Enter busy policy'
+    api.poll(now=.3)
+    assert workflow.status(rid)['state'] == 'end'
+    graph.close()
 
 for mode in ("cancel", "mute", "delete", "link", "setting", "clear", "timeout", "bad", "fail"):
     graph = Graph()
@@ -283,7 +305,8 @@ discovery.mkdir(exist_ok=True)
     'from ..extensions import ModuleSpec\nSPEC = ModuleSpec("discovered_consumer", dependencies=("discovered_base",))\n', encoding="utf-8")
 (discovery / "z_base.py").write_text(
     'from ..extensions import ModuleSpec\ndef create_spec():\n    return ModuleSpec("discovered_base")\n', encoding="utf-8")
-modules.__path__.append(str(discovery))
+original_paths = list(modules.__path__)
+modules.__path__[:] = [str(discovery)]
 with RestrictBlend():
     api.register()
 assert api.registered_modules().index("discovered_base") < api.registered_modules().index("discovered_consumer")
@@ -295,7 +318,7 @@ else:
     raise AssertionError("A live dependency was unregistered")
 api.unregister_module("discovered_consumer")
 api.unregister_module("discovered_base")
-modules.__path__.remove(str(discovery))
+modules.__path__[:] = original_paths
 
 # Consumer failures cannot strand another module, callbacks, or resource claims.
 def raising(*_args):
@@ -309,8 +332,13 @@ addon._undo_pre(None)
 addon._undo_post(None)
 assert not scheduler.is_suspended()
 assert any(item["source"] == "cleanup_failure.recover" for item in api.lifecycle_errors())
+restricted_graph = Graph()
+restricted_run = restricted_graph.fire()
+cancel_count = len(cancelled)
 with RestrictBlend():
     addon.unregister()
+    assert len(cancelled) == cancel_count + 1, 'Restricted disable skipped the pending action cancel hook'
+    assert cancelled[-1][0] == restricted_run and cancelled[-1][2]
     addon.register()
     addon.unregister()
 assert not api.registered_modules()

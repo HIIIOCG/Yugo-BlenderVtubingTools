@@ -391,12 +391,26 @@ def _objects():
     return getattr(bpy.data, "objects", {})
 
 
+def _object_key(obj):
+    from . import extensions
+    reference = extensions.object_ref(obj)
+    return reference["session_uid"], reference["pointer"]
+
+
+def _object_from_key(key):
+    from . import extensions
+    return extensions.resolve_object({"session_uid": key[0], "pointer": key[1]})
+
+
 def _restore_target(target, base):
-    kind, object_name, name = target
-    obj = _objects().get(object_name)
+    kind, object_key, name = target
+    obj = _object_from_key(object_key) if kind == "bone" else _objects().get(object_key)
     if obj is None:
         return
     if kind == "bone":
+        from . import extensions
+        if extensions.transform_owner(obj) is not None:
+            return
         bone = obj.pose.bones.get(name) if obj.type == "ARMATURE" else None
         if bone:
             mode, quaternion, euler, axis = base
@@ -405,7 +419,7 @@ def _restore_target(target, base):
             bone.rotation_axis_angle = axis
             bone.rotation_mode = mode
     else:
-        key = runtime._shape_key(object_name, name)
+        key = runtime._shape_key(object_key, name)
         if key:
             key.value = base
 
@@ -416,17 +430,28 @@ def release(uid):
     _release_official(uid)
 
 
+def pose_writers(armature):
+    """Existing per-bone Apply owners for an armature, without evaluating it."""
+    key = _object_key(armature)
+    writers = {uid for uid, owned in _owners.items()
+               if any(target[0] == 'bone' and target[1] == key for target in owned)}
+    # An official spring flag is retained even if the latest pull has no bone
+    # values. It must be restored before a whole-armature owner takes over.
+    writers.update(_official.get(key, {}).get("owners", ()))
+    return tuple(writers)
+
+
 def _release_official(uid, keep=None):
-    for name, record in tuple(_official.items()):
-        if name == keep:
+    for key, record in tuple(_official.items()):
+        if key == keep:
             continue
         record["owners"].discard(uid)
         if not record["owners"]:
-            armature = _objects().get(name)
+            armature = _object_from_key(key)
             spring = runtime._official_spring_bone(armature, record["data"]) if armature else None
             if spring is not None:
                 spring.enable_animation = record["enabled"]
-            del _official[name]
+            del _official[key]
 
 
 def apply(node, value, context=None):
@@ -444,12 +469,15 @@ def apply(node, value, context=None):
             armature = _objects().get(target_name)
             if armature is None or armature.type != "ARMATURE":
                 raise ValueError("Target Armature is unavailable")
+            from . import extensions
+            if extensions.transform_owner(armature) is not None:
+                raise ValueError('Another feature already controls this armature pose')
             if value.spring_data is not None and target_name != value.armature_name:
                 raise ValueError("Spring rotations must target their simulated Armature")
             for name, rotation in value.values.items():
                 bone = armature.pose.bones.get(name)
                 if bone:
-                    desired[("bone", armature.name, name)] = (bone, rotation)
+                    desired[("bone", _object_key(armature), name)] = (bone, rotation)
     else:
         if not isinstance(value, ShapeValues):
             raise ValueError("Connect Shape Keys Values")
@@ -495,12 +523,13 @@ def apply(node, value, context=None):
             _release_official(other)
     for target in set(previous) - desired.keys():
         _restore_target(target, previous.pop(target))
-    spring_target = value.armature_name if isinstance(value, BoneRotations) and value.spring_data is not None else None
+    spring_armature = _objects().get(value.armature_name) if isinstance(value, BoneRotations) and value.spring_data is not None else None
+    spring_target = _object_key(spring_armature) if spring_armature is not None else None
     _release_official(uid, spring_target)
     if spring_target:
-        spring = runtime._official_spring_bone(armature, value.spring_data)
+        spring = runtime._official_spring_bone(spring_armature, value.spring_data)
         if spring is not None:
-            record = _official.setdefault(armature.name, {"enabled": bool(spring.enable_animation), "data": value.spring_data, "owners": set()})
+            record = _official.setdefault(spring_target, {"enabled": bool(spring.enable_animation), "data": value.spring_data, "owners": set()})
             record["owners"].add(uid)
             spring.enable_animation = False
     for target, (owner, result) in desired.items():

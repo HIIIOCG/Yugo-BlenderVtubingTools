@@ -1,5 +1,86 @@
 # Yugu Node Studio
 
+## 0.7.0 release candidate — Studio feature integration
+
+This candidate integrates the new features into Studio's existing graph, Add
+menu, Action Flow cards, and shared scheduler through the public feature API
+merged in PR #18. Floating UI, Prop Physics, and native Ragdoll Motion are
+integrated into this candidate. Final candidate qualification and release publication are
+recorded separately; this document is not a published-release announcement.
+
+### Install
+
+Use Blender 5.1 or newer. Save your `.blend`, then open **Edit → Preferences →
+Get Extensions → menu → Install from Disk**, select
+`yugu_node_studio-0.7.0.zip`, and enable **Yugu Node Studio**. The package ID remains
+`yugu_node_studio` for upgrades. Open the Yugu Node Studio editor to use the native
+**Add → Floating UI**, **Add → Prop Physics**, and **Add → Ragdoll Motion** categories. Existing Studio
+graphs and keyboard/action nodes remain available.
+
+### Try Floating UI
+
+Press F3 → **Create Studio Floating UI Example**. It creates an editable layout,
+anchor, and a graph connecting **Message Source → Floating UI Display**. Enter
+text and author on Message Source, optionally choose a local avatar image, and
+press **Send Once**. Each click sends a new message event; the display copies the
+layout, smoothly moves existing rows, and bounds the queue by Maximum Messages.
+**Clear Generated Messages** removes the generated display while retaining its
+template and anchor.
+
+Display `End` means insertion completed; row movement continues in the shared
+scheduler. Custom templates use a FONT message object and a MESH avatar object
+with an Image Texture material; an optional FONT author is supported. Avatar
+paths are local files. Platform receivers and OBS integration are separate work.
+See [Floating UI details](modules/floating_ui/README.md).
+
+### Try Prop Physics
+
+Press F3 → **Create Studio Physics Example**, then open the **Studio Physics
+Example** graph. Its controls provide **Start**, **Stop**, **Reset**, **Impulse**,
+**Grab**, **Release**, **Attract**, **Stop Attraction**, **Force**, and **Clear
+Force**. Pause the animation timeline and press **Start** explicitly. Move the
+configured anchor after Grab; Release retains its movement. Attract Home remains
+Running until stable return, or reports Failed on timeout. Stop freezes the pose;
+Reset restores the home captured at Start.
+
+This is prop physics with sphere colliders for dynamic props, oriented box
+colliders for static obstacles, and up to 32 props per world. Use independently
+writable objects without parents, constraints, animation, drivers, or native
+rigid bodies. Saved scenes never restart
+the simulation automatically. See [Prop Physics details](modules/physics/README.md).
+
+### Try Ragdoll Motion
+
+Press F3 → **Create Studio Ragdoll Example**, then open **Studio Ragdoll Example**.
+The original 21-bone procedural rig and default settings are preserved. Its typed
+**Pose Source → Ragdoll Motion → Apply Ragdoll** graph uses normal Studio actions
+and the shared scheduler. Pause the timeline and press **Start** (the `Enter`
+event), then **Hit**. Reading Pose or Status does not start or advance simulation.
+Saved graphs do not auto-start.
+
+Enter and **Recover** stay Running until the grounded/stable gate and recovery
+blend actually reach `COMPLETED`; only then do those invocations emit End. Hit
+ends when its impulse is installed and can interrupt recovery without replacing
+the current pose or velocity. **Stop** restores captured transforms still owned
+by the session and releases its lease. **Cancel** cancels a pending invocation;
+the Enter busy policy applies only to Enter, so Hit, Recover and Stop remain
+available with Ignore or Restart selected. A completed session retains its lease
+for another Hit; use Stop to hand control back.
+
+Stop and release existing Apply, native-pose, or spring controllers before
+starting ragdoll. Its armature claim reserves the whole pose. After successful
+capture, props held by configured physics anchors parented to that rig are
+released; unrelated anchors keep their props. The model supports up to 128
+selected bones. Recovery is a kinematic blend. Animated/IK-driven, linked,
+constrained, mirrored, sheared, or nonuniformly scaled rigs are rejected.
+See [Ragdoll details](modules/ragdoll/README.md).
+
+Changes to configuration or graph connections, mute, deletion, Undo/Redo, file
+loading, and extension shutdown retire affected runtime state and release
+transform claims. Competing writers cannot control the same claimed object.
+Floating UI cleans its own generated rows; Prop Physics retains user objects.
+The original standalone preview trees and timers are excluded from this package.
+
 ## 0.6.0 — Keyboard, modes and action cards
 
 Keyboard input is split into reusable data, state, event and value nodes. On

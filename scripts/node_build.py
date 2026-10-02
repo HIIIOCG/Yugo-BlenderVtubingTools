@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import zipfile
@@ -9,10 +10,15 @@ from node_check_version import version
 from node_environment import ROOT, ADDON, isolated_environment
 
 
+def recovery_file(name):
+    return re.search(r'\.blend(?:[1-9]\d*|@.*)$', name) is not None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--blender', required=True, type=Path)
     parser.add_argument('--output', type=Path, default=ROOT / 'dist')
+    parser.add_argument('--require-clean', action='store_true', help='Reject uncommitted addon changes for release builds.')
     args = parser.parse_args()
     binary = args.blender.resolve(strict=True)
     if not binary.is_file() or not args.blender.is_absolute():
@@ -20,6 +26,11 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     value = version()
+    revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    changes = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=all', '--', 'addons/yugu_node_studio'],
+                             cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    if args.require_clean and changes:
+        raise SystemExit('Release builds require committed, clean Studio source.')
     environment = isolated_environment(output / 'build')
     commands = (
         [binary, '--command', 'extension', 'validate', ADDON],
@@ -42,24 +53,32 @@ def main():
         expected = {path.relative_to(ADDON).as_posix() for path in ADDON.rglob('*')
                     if path.is_file() and '__pycache__' not in path.parts
                     and '.git' not in path.parts and 'tests' not in path.parts
-                    and path.suffix != '.pyc'}
+                    and path.suffix != '.pyc' and not recovery_file(path.name)}
         actual = {name for name in names if not name.endswith('/')}
         if actual != expected or len(actual) != len([name for name in names if not name.endswith('/')]):
             raise SystemExit('Studio package file set differs from source: missing=' +
                              str(sorted(expected - actual)) + ', extra=' + str(sorted(actual - expected)))
         if any(name.startswith(('addons/', 'tests/', 'scripts/', '.dev/', '.github/')) or
-               '__pycache__' in name or name.endswith(('.pyc', '.blend1')) for name in names):
+               '__pycache__' in name or name.endswith('.pyc') or recovery_file(name) for name in names):
             raise SystemExit('Non-runtime files entered the Studio ZIP.')
         for name in names:
             if not name.endswith('/') and package.read(name) != (ADDON / name).read_bytes():
                 raise SystemExit('Studio package does not match this source: ' + name)
+    tracked = subprocess.run(['git', 'ls-files', '-z', '--', 'addons/yugu_node_studio'], cwd=ROOT,
+                             capture_output=True, check=True).stdout.decode('utf-8').split('\0')
+    prefix = 'addons/yugu_node_studio/'
+    untracked_runtime = actual - {name[len(prefix):] for name in tracked if name.startswith(prefix)}
+    if args.require_clean and untracked_runtime:
+        raise SystemExit('Release package contains uncommitted or ignored files: ' + str(sorted(untracked_runtime)))
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix('.zip.sha256').write_text(checksum + '  ' + archive.name + '\n', encoding='utf-8')
     record = {'package': str(archive), 'source': str(ADDON), 'version': value,
+              'source_commit': revision, 'source_dirty': bool(changes or untracked_runtime),
+              'source_files_sha256': {name: hashlib.sha256((ADDON / name).read_bytes()).hexdigest() for name in sorted(actual)},
               'entries': len(names), 'bytes': archive.stat().st_size, 'sha256': checksum,
               'source_validate': 'passed', 'zip_validate': 'passed', 'byte_comparison': 'passed'}
     (output / 'studio-build.json').write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(record, indent=2))
+    print(json.dumps({key: item for key, item in record.items() if key != 'source_files_sha256'}, indent=2))
 
 
 if __name__ == '__main__':

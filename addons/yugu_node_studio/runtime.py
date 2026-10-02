@@ -72,6 +72,31 @@ _expression_state = {}
 _key_state = {}
 
 
+def pose_writers(armature):
+    """Retained native-pose/spring owners without advancing their solvers."""
+    reference = _pose_object_ref(armature)
+    return tuple(key for states in (_pose_state, _spring_output_state)
+                 for key, state in states.items()
+                 if state.get('armature_ref') == reference and
+                 (states is _spring_output_state or state.get('bones') or state.get('root')))
+
+
+def _pose_object_ref(armature):
+    from . import extensions
+    return extensions.object_ref(armature)
+
+
+def _pose_object(reference):
+    from . import extensions
+    armature = extensions.resolve_object(reference)
+    return armature if armature is not None and armature.type == "ARMATURE" else None
+
+
+def _pose_reserved(armature):
+    from . import extensions
+    return extensions.transform_owner(armature) is not None
+
+
 def _tree_key(tree):
     try:
         return tree.as_pointer()
@@ -744,8 +769,10 @@ def _restore_spring_output_state(key, *, reset_pose=True):
     output_state = _spring_output_state.pop(key, None)
     if not output_state:
         return
-    armature = bpy.data.objects.get(output_state["armature"])
-    if armature is None or armature.type != "ARMATURE":
+    armature = _pose_object(output_state.get("armature_ref"))
+    if armature is None:
+        return
+    if _pose_reserved(armature):
         return
     spring_bone = _official_spring_bone(armature, output_state["spring_data"])
     if spring_bone is not None:
@@ -784,6 +811,10 @@ def _initialize_spring(node, spring_data, context):
     armature = bpy.data.objects.get(spring_data.armature_name)
     if armature is None or armature.type != "ARMATURE":
         raise RuntimeError("The Spring Data armature is not available")
+    # Do not retire an old solver, reset a bone, or touch the official spring
+    # switch before the whole-rig owner's lease has been checked.
+    if _pose_reserved(armature):
+        raise RuntimeError("Another feature controls this armature pose")
 
     key = _spring_output_key(node)
     state = _node_motion_state(node)
@@ -812,10 +843,12 @@ def _initialize_spring(node, spring_data, context):
     state["spring_solver"] = solver
     state["spring_signature"] = (spring_data.armature_name, id(spring_data))
     state["spring_data"] = spring_data
+    state["spring_armature_ref"] = _pose_object_ref(armature)
     state["spring_clock_accumulator"] = 0.0
     state.pop("spring_error", None)
     _spring_output_state[key] = {
         "armature": armature.name,
+        "armature_ref": _pose_object_ref(armature),
         "bone_names": reset_names,
         "spring_data": spring_data,
         "previous_enable_animation": previous_enable_animation,
@@ -824,7 +857,7 @@ def _initialize_spring(node, spring_data, context):
     node.spring_active = True
     node.spring_last_error = ""
     node.spring_status = (
-        f"Running · {len(solver.springs)} springs · {int(node.spring_fps)} FPS"
+        f"Running · {len(solver.springs)} springs · {int(getattr(node, 'spring_fps', 60))} FPS"
     )
 
 
@@ -875,8 +908,11 @@ def stop_spring(node, *, reset_pose=True):
 def reload_spring(node, context):
     if not node.spring_active:
         raise RuntimeError("Start Spring Physics before reloading")
-    stop_spring(node, reset_pose=True)
     spring_data = _spring_input_value(node, context.scene)
+    armature = bpy.data.objects.get(getattr(spring_data, "armature_name", ""))
+    if armature is not None and _pose_reserved(armature):
+        raise RuntimeError("Another feature controls this armature pose")
+    stop_spring(node, reset_pose=True)
     _initialize_spring(node, spring_data, context)
 
 
@@ -1296,10 +1332,13 @@ def _evaluate_spring(node, spring_data, delta_time=FIXED_SPRING_STEP):
     signature = (getattr(spring_data, "armature_name", ""), id(spring_data))
     if signature != state.get("spring_signature"):
         node.spring_last_error = "Spring Data changed · press Reload"
-    armature = bpy.data.objects.get(state["spring_data"].armature_name)
-    if armature is None or armature.type != "ARMATURE":
+    armature = _pose_object(state.get("spring_armature_ref"))
+    if armature is None:
         node.spring_last_error = "The Spring Data armature is no longer available"
         stop_spring(node, reset_pose=False)
+        return 0
+    if _pose_reserved(armature):
+        node.spring_last_error = 'Another feature controls this armature pose'
         return 0
     try:
         solved_rotations = solver.step(armature, _spring_step(node))
@@ -1316,7 +1355,7 @@ def _evaluate_spring(node, spring_data, delta_time=FIXED_SPRING_STEP):
         if bone is not None:
             changed += int(_assign_basis_rotation(bone, solved))
     node.spring_status = (
-        f"Running · {len(solver.springs)} springs · {int(node.spring_fps)} FPS"
+        f"Running · {len(solver.springs)} springs · {int(getattr(node, 'spring_fps', 60))} FPS"
     )
     return changed
 
@@ -1326,6 +1365,8 @@ def _write_native_pose(node, pose):
         return 0, None, set()
     armature = bpy.data.objects.get(pose.armature_name)
     if armature is None or armature.type != "ARMATURE":
+        return 0, None, set()
+    if _pose_reserved(armature):
         return 0, None, set()
     changed = 0
     current_bones = set()
@@ -1353,6 +1394,12 @@ def _apply_pose(tree, node, pose):
         if state["armature"]:
             _restore_output_state(key)
         return 0
+    destination = bpy.data.objects.get(pose.armature_name)
+    if destination is None or destination.type != "ARMATURE" or _pose_reserved(destination):
+        return 0
+    if state.get("armature_ref") and state["armature_ref"] != _pose_object_ref(destination):
+        _restore_output_state(key)
+        state = _pose_state.setdefault(key, {"bones": set(), "armature": "", "root": False})
     changed, armature, current_bones = _write_native_pose(node, pose)
     if armature is None:
         return 0
@@ -1365,6 +1412,7 @@ def _apply_pose(tree, node, pose):
             changed += int(_assign_location(pose_bone, Vector((0.0, 0.0, 0.0))))
     state["bones"] = current_bones
     state["armature"] = armature.name
+    state["armature_ref"] = _pose_object_ref(armature)
     if node.write_root and pose.root is not None:
         state["root"] = True
     elif state["root"]:
@@ -1584,8 +1632,8 @@ def _apply_material_targets(state, all_targets, contributions):
 def _restore_output_state(key):
     pose = _pose_state.pop(key, None)
     if pose:
-        armature = bpy.data.objects.get(pose["armature"])
-        if armature is not None and armature.type == "ARMATURE":
+        armature = _pose_object(pose.get("armature_ref"))
+        if armature is not None and not _pose_reserved(armature):
             for bone_name in pose["bones"]:
                 bone = armature.pose.bones.get(bone_name)
                 if bone is not None:

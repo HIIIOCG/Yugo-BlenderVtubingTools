@@ -1,0 +1,1059 @@
+{
+  "fixture": "studio-0.6.0-graph.blend",
+  "sha256": "b4f4c0711fb6b8af163396c08e0f991717980b59cb5f849ccef8a32decd0727d",
+  "source_commit": "b87004c85694f80176eb13823685fbdb53a8b390",
+  "version": "0.6.0",
+  "blender": "5.1.2",
+  "graphs": {
+    "Keyboard and Action Flow Demo": {
+      "nodes": {
+        "Keyboard Data": {
+          "type": "YUGUS_NODE_keyboard_data",
+          "inputs": [],
+          "outputs": [
+            [
+              "Data",
+              "Data",
+              "YUGUS_NS_keyboard_data"
+            ]
+          ]
+        },
+        "Control Mode": {
+          "type": "YUGUS_NODE_control_mode",
+          "inputs": [
+            [
+              "Cycle",
+              "Cycle",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Lock",
+              "Lock",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Unlock",
+              "Unlock",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "Changed",
+              "Changed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Mode",
+              "Mode",
+              "YUGUS_NS_control_mode"
+            ],
+            [
+              "Unlocked",
+              "Unlocked",
+              "YUGUS_NS_input_state"
+            ]
+          ]
+        },
+        "Action Flow": {
+          "type": "YUGUS_NODE_action_flow",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Key State": {
+          "type": "YUGUS_NODE_key_state",
+          "inputs": [
+            [
+              "Keyboard",
+              "Keyboard",
+              "YUGUS_NS_keyboard_data"
+            ],
+            [
+              "Mode",
+              "Mode",
+              "YUGUS_NS_control_mode"
+            ]
+          ],
+          "outputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ]
+        },
+        "State Events": {
+          "type": "YUGUS_NODE_state_events",
+          "inputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ],
+          "outputs": [
+            [
+              "On",
+              "On",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Off",
+              "Off",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Changed",
+              "Changed",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Key State.001": {
+          "type": "YUGUS_NODE_key_state",
+          "inputs": [
+            [
+              "Keyboard",
+              "Keyboard",
+              "YUGUS_NS_keyboard_data"
+            ],
+            [
+              "Mode",
+              "Mode",
+              "YUGUS_NS_control_mode"
+            ]
+          ],
+          "outputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ]
+        },
+        "State Events.001": {
+          "type": "YUGUS_NODE_state_events",
+          "inputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ],
+          "outputs": [
+            [
+              "On",
+              "On",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Off",
+              "Off",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Changed",
+              "Changed",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Key State.002": {
+          "type": "YUGUS_NODE_key_state",
+          "inputs": [
+            [
+              "Keyboard",
+              "Keyboard",
+              "YUGUS_NS_keyboard_data"
+            ],
+            [
+              "Mode",
+              "Mode",
+              "YUGUS_NS_control_mode"
+            ]
+          ],
+          "outputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ]
+        },
+        "State Events.002": {
+          "type": "YUGUS_NODE_state_events",
+          "inputs": [
+            [
+              "State",
+              "State",
+              "YUGUS_NS_input_state"
+            ]
+          ],
+          "outputs": [
+            [
+              "On",
+              "On",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Off",
+              "Off",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Changed",
+              "Changed",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Test Event": {
+          "type": "YUGUS_NODE_test_event",
+          "inputs": [],
+          "outputs": [
+            [
+              "Trigger",
+              "Trigger",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Test Event.001": {
+          "type": "YUGUS_NODE_test_event",
+          "inputs": [],
+          "outputs": [
+            [
+              "Trigger",
+              "Trigger",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Test Event.002": {
+          "type": "YUGUS_NODE_test_event",
+          "inputs": [],
+          "outputs": [
+            [
+              "Trigger",
+              "Trigger",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Set Mode": {
+          "type": "YUGUS_NODE_set_mode",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Mode",
+              "Mode",
+              "YUGUS_NS_control_mode"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Test Action": {
+          "type": "YUGUS_NODE_test_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Test Action.001": {
+          "type": "YUGUS_NODE_test_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Test Action.002": {
+          "type": "YUGUS_NODE_test_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        }
+      },
+      "links": [
+        [
+          "Action Flow",
+          "Cancelled",
+          "Test Action.001",
+          "Enter"
+        ],
+        [
+          "Action Flow",
+          "End",
+          "Test Action",
+          "Enter"
+        ],
+        [
+          "Action Flow",
+          "Failed",
+          "Test Action.002",
+          "Enter"
+        ],
+        [
+          "Control Mode",
+          "Mode",
+          "Key State",
+          "Mode"
+        ],
+        [
+          "Control Mode",
+          "Mode",
+          "Set Mode",
+          "Mode"
+        ],
+        [
+          "Key State",
+          "State",
+          "State Events",
+          "State"
+        ],
+        [
+          "Key State.001",
+          "State",
+          "State Events.001",
+          "State"
+        ],
+        [
+          "Key State.002",
+          "State",
+          "State Events.002",
+          "State"
+        ],
+        [
+          "Keyboard Data",
+          "Data",
+          "Key State",
+          "Keyboard"
+        ],
+        [
+          "Keyboard Data",
+          "Data",
+          "Key State.001",
+          "Keyboard"
+        ],
+        [
+          "Keyboard Data",
+          "Data",
+          "Key State.002",
+          "Keyboard"
+        ],
+        [
+          "State Events",
+          "On",
+          "Action Flow",
+          "Enter"
+        ],
+        [
+          "State Events.001",
+          "On",
+          "Control Mode",
+          "Cycle"
+        ],
+        [
+          "State Events.002",
+          "On",
+          "Action Flow",
+          "Cancel"
+        ],
+        [
+          "Test Event",
+          "Trigger",
+          "Action Flow",
+          "Enter"
+        ],
+        [
+          "Test Event.001",
+          "Trigger",
+          "Action Flow",
+          "Cancel"
+        ],
+        [
+          "Test Event.002",
+          "Trigger",
+          "Set Mode",
+          "Enter"
+        ]
+      ]
+    },
+    "Keyboard and Action Flow Demo · Steps": {
+      "nodes": {
+        "Flow Entry": {
+          "type": "YUGUS_NODE_flow_entry",
+          "inputs": [],
+          "outputs": [
+            [
+              "Start",
+              "Start",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Flow End": {
+          "type": "YUGUS_NODE_flow_end",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": []
+        },
+        "Test Action": {
+          "type": "YUGUS_NODE_test_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Parallel": {
+          "type": "YUGUS_NODE_flow_parallel",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ],
+            [
+              "Branch 1",
+              "Branch 1",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Branch 2",
+              "Branch 2",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Branch 3",
+              "Branch 3",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Wait All": {
+          "type": "YUGUS_NODE_flow_wait_all",
+          "inputs": [
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Branch 1",
+              "Branch 1",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Branch 2",
+              "Branch 2",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Branch 3",
+              "Branch 3",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Wait Action": {
+          "type": "YUGUS_NODE_wait_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Wait Action.001": {
+          "type": "YUGUS_NODE_wait_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Repeat": {
+          "type": "YUGUS_NODE_flow_repeat",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ],
+            [
+              "Body",
+              "Body",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Wait Action.002": {
+          "type": "YUGUS_NODE_wait_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "If": {
+          "type": "YUGUS_NODE_flow_if",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Condition",
+              "Condition",
+              "YUGUS_NS_trigger"
+            ]
+          ],
+          "outputs": [
+            [
+              "True",
+              "True",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "False",
+              "False",
+              "YUGUS_NS_update_event"
+            ]
+          ]
+        },
+        "Wait Action.003": {
+          "type": "YUGUS_NODE_wait_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Wait Action.004": {
+          "type": "YUGUS_NODE_wait_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        },
+        "Test Action.001": {
+          "type": "YUGUS_NODE_test_action",
+          "inputs": [
+            [
+              "Enter",
+              "Enter",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancel",
+              "Cancel",
+              "YUGUS_NS_update_event"
+            ]
+          ],
+          "outputs": [
+            [
+              "End",
+              "End",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Cancelled",
+              "Cancelled",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Failed",
+              "Failed",
+              "YUGUS_NS_update_event"
+            ],
+            [
+              "Running",
+              "Running",
+              "YUGUS_NS_trigger"
+            ]
+          ]
+        }
+      },
+      "links": [
+        [
+          "Flow Entry",
+          "Start",
+          "Test Action",
+          "Enter"
+        ],
+        [
+          "If",
+          "False",
+          "Wait Action.004",
+          "Enter"
+        ],
+        [
+          "If",
+          "True",
+          "Wait Action.003",
+          "Enter"
+        ],
+        [
+          "Parallel",
+          "Branch 1",
+          "Wait Action",
+          "Enter"
+        ],
+        [
+          "Parallel",
+          "Branch 2",
+          "Wait Action.001",
+          "Enter"
+        ],
+        [
+          "Repeat",
+          "Body",
+          "Wait Action.002",
+          "Enter"
+        ],
+        [
+          "Repeat",
+          "End",
+          "If",
+          "Enter"
+        ],
+        [
+          "Test Action",
+          "End",
+          "Parallel",
+          "Enter"
+        ],
+        [
+          "Test Action.001",
+          "End",
+          "Flow End",
+          "Enter"
+        ],
+        [
+          "Wait Action",
+          "End",
+          "Wait All",
+          "Branch 1"
+        ],
+        [
+          "Wait Action.001",
+          "End",
+          "Wait All",
+          "Branch 2"
+        ],
+        [
+          "Wait Action.003",
+          "End",
+          "Test Action.001",
+          "Enter"
+        ],
+        [
+          "Wait Action.004",
+          "End",
+          "Test Action.001",
+          "Enter"
+        ],
+        [
+          "Wait All",
+          "End",
+          "Repeat",
+          "Enter"
+        ]
+      ]
+    }
+  }
+}

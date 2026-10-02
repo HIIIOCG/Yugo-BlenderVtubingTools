@@ -43,8 +43,10 @@ Windows 啟動範例，請替換任務 ID 和描述：
 python -B scripts/start_task.py --task 123 --slug camera-targets --role feature --scope "addons/yugu_node_studio/modules/camera/**" --scope "tests/yugu_node_studio/blender_camera.py" --workspace-root D:\Projects\BCON26\motion_codedev\.workspaces\tasks
 ```
 
-這是任務 #3 建立功能模組介面後的示例；目前 Node 程式與上述模組尚未匯入。
-實際 scope 一律複製最新 Issue，不能用示例自行擴大範圍。
+公開功能介面已由 #3／[PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18)
+完成 qualified 整合，契約見 [PUBLIC_API.md](../architecture/PUBLIC_API.md)。`modules/camera/`
+仍是示意範圍，不能當作該模組已存在的依據。實際 scope 一律複製最新 Issue，
+並讀取工作區的真實來源，不能用示例自行擴大範圍。
 
 `--workspace-root` 是放置新工作區的絕對父目錄，必須在執行工具的 repository
 之外。不要把新工作區放進該 repository 的原始碼或打包內容中。範例父目錄
@@ -155,13 +157,22 @@ Blender user 路徑設成任務目錄，再啟動獨立程序；`--factory-start
 只有整合角色可更新 release metadata、建立正式 tag 及執行已獲授權的發布。
 已發布 tag／asset 保留；需要修正時發布新版本。
 
-目前 `v*` tag 對應 `addons/yugo/` 的 legacy release workflow。Node source 尚未
-匯入；在 Node bootstrap 任務確立 package ID、來源位置、多產品版本／tag
-路由及安裝包驗證前，不把 Node tag 交給這個 legacy workflow。
+`v*` tag 對應 `addons/yugo/` 的 legacy release workflow。Studio package ID 是
+`yugu_node_studio`，版本檢查採 `studio-v<version>`；integration 角色在正式發布
+前驗證 Studio 的 release route 與候選安裝包，不把 Studio tag 交給 legacy workflow。
 
-結構整理 #8 先合併，任務 #2 再從最新主線把 Node 來源匯入
-`addons/yugu_node_studio/`，測試放 `tests/yugu_node_studio/`。第一次匯入必須
-先記錄來源版本及檔案差異，補足測試與跨套件 fixture 需求，再由獨立 PR 完成。
-任務 #3／#4 仍等待 #2 的合格基準。現存 `motion_codedev` 開發資料夾在過渡期間是唯讀
-參考，不做雙向自動同步；匯入後新任務以 Git 工作區為準。舊 Yugo 的程式、
-package ID、版本及發行檔保留，不用直接覆寫舊 extension 的方式遷移。
+結構整理 #8 與來源導入 #2 已完成；[PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15)
+把 qualified Studio 0.6.0 基準導入 `addons/yugu_node_studio/`，測試放
+`tests/yugu_node_studio/`。來源、檔案比對、可重現入口及受限項目記錄在
+[NODE_BASELINE.md](NODE_BASELINE.md)。#3 公開介面已透過
+[PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18) 合併；功能消費端採
+[PUBLIC_API.md](../architecture/PUBLIC_API.md) 的 module/action/evaluator 與 lifecycle 契約。
+#16 的 0.7.0 release candidate 已接入 Floating UI、Prop Physics 與原生 Ragdoll Motion；
+最終候選驗證及
+正式 release 尚按整合任務記錄處理。後續共用介面或 adapter 的變更仍依 PR 順序接入。
+
+後續修改、建置與測試以 Git 工作區為準。Studio 的入口為
+`scripts/node_check_version.py`、`scripts/node_build.py`、`scripts/node_run_checks.py`；
+最後一個工具支援 `--list`，完整指令見 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
+現存 `motion_codedev` 開發來源保留為唯讀參考，不做雙向自動同步。
+舊 Yugo 的程式、package ID、版本及發行檔保留。

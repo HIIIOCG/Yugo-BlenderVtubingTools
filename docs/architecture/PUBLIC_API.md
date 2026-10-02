@@ -1,10 +1,12 @@
 # Studio feature API
 
-Task #3 adds a public extension contract to the qualified Studio 0.6.0 baseline
+Task #3, merged through PR #18, adds a public extension contract to the qualified Studio 0.6.0 baseline
 imported by #2. It preserves existing package, node and socket identities, socket
 order, graph persistence, and legacy runtime behavior. Existing modules have not
-been renamed or moved. Floating UI and object physics are separate consumers of
-this contract, with their own feature PRs.
+been renamed or moved. The 0.7.0 candidate includes Floating UI, Prop Physics,
+and native Ragdoll Motion consumers. Ragdoll declares typed world-space Pose
+values, invocation-scoped actions, and exclusive armature ownership through this
+contract. Candidate qualification and release publication are recorded separately.
 
 ## Declare a bundled feature
 
@@ -75,7 +77,7 @@ copies and validates the event before dispatch. A source sends events explicitly
 evaluating a value does not cause an event to repeat on every tick.
 
 `ActionSpec(start, update=None, cancel=None, inputs=("Enter",),
-configuration=None)` declares the public action callbacks:
+configuration=None, policy_inputs=None)` declares the public action callbacks:
 
 - `start(context) -> ActionResult` runs once for each accepted invocation.
 - `update(context, state) -> ActionResult` polls a running invocation after the
@@ -115,7 +117,12 @@ Failed with `Action timed out` and invokes consumer cancellation cleanup.
 
 Existing policies apply to extension nodes: `PARALLEL` keeps invocations
 independent, `IGNORE` ignores new input while a task is running, and `RESTART`
-cancels previous invocations before starting again. Cancel input uses existing
+cancels previous invocations before starting again.
+`policy_inputs=None` preserves node-wide policy behavior. A multi-command endpoint
+can declare `policy_inputs=("Enter",)`: only Enter applies that policy to pending
+Enter tickets; Hit/Recover/Stop execute while the session is waiting. Cancel keeps
+its normal invocation selection. This prevents IGNORE from suppressing Stop and
+RESTART from retiring the session before installing a Hit. Cancel input uses
 `cancel_run_id` / `target_run_id` payload selection. Deletion, mute, configuration
 and link changes cancel watched tasks. Stale/deleted/reconfigured endpoints do
 not emit continuations into a changed graph. Clear/load/undo/unregister cancels
@@ -150,8 +157,15 @@ must reconcile node deletion, mute, topology/configuration change and manual
 output deletion in their shared scheduler callback, restoring their owned data
 before release. Generated-output services claim only generated copies and do not
 claim or edit templates/anchors. Core clears remaining claims during lifecycle
-cleanup. Claims coordinate participating object writers within this Studio
-process; existing bone/shape Apply arbitration stays unchanged.
+cleanup. Claims coordinate participating writers within this Studio process.
+Claiming an armature reserves its object transform and entire pose: active core
+bone Apply, native pose and spring output owners must release first. Core pose
+writers reject or skip a leased armature before writing.
+`transform_owner(object)` returns its current lease owner without evaluating the
+graph. Unclaimed armatures retain existing per-bone Apply arbitration, including
+writers on disjoint bones; shape key arbitration stays unchanged. Explicitly
+stop/release a pose controller before starting ragdoll, and release ragdoll before
+resuming that controller.
 
 Before Load or Undo/Redo replaces RNA, core suspends its scheduler, cancels
 tickets, then calls `cleanup(reason)` on modules in reverse registration order.

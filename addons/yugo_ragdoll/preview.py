@@ -183,7 +183,9 @@ def _uses_node(key, record, node):
 
 
 def _locate(key):
-    for tree in bpy.data.node_groups:
+    # Extension register/unregister can run under Blender's RestrictBlend.
+    # Teardown still retires clocks and service sessions when RNA is absent.
+    for tree in getattr(bpy.data, "node_groups", ()):
         if _ptr(tree) == key[0] and tree.bl_idname == TREE_ID:
             for node in tree.nodes:
                 if _ptr(node) == key[1] and node.bl_idname == APPLY_ID:
@@ -338,9 +340,12 @@ class TickSocket(bpy.types.NodeSocket):
         return (.85, .12, .1, 1)
 
 
-class StatusSocket(PoseSocket):
+class StatusSocket(bpy.types.NodeSocket):
     bl_idname = "YUGORAG_NS_status"
     bl_label = "Ragdoll Status"
+
+    def draw(self, _context, layout, _node, text):
+        layout.label(text=text)
 
     def draw_color(self, _context, _node):
         return (.3, .7, .45, 1)

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Yugu Node Studio",
     "author": "Yugo Contributors",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (5, 1, 0),
     "location": "Node Editor / View3D > Sidebar > Yugu Studio",
     "description": "Node-based VRM Humanoid motion driving native Blender data",

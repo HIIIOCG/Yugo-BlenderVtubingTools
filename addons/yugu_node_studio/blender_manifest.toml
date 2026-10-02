@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "yugu_node_studio"
-version = "0.6.0"
+version = "0.7.0"
 name = "Yugu Node Studio"
 tagline = "Humanoid motion nodes with MToon and compositor controls"
 maintainer = "Yugo Contributors"
@@ -15,11 +15,14 @@ tags = ["Animation", "Rigging"]
 
 [permissions]
 network = "Receive VMC and iFacialMocap motion data"
+files = "Load local UI templates and avatar images"
 
 [build]
 paths_exclude_pattern = [
   "__pycache__/",
   "*.pyc",
+  "*.blend[1-9]",
+  "*.blend@*",
   ".git",
   "tests/",
 ]

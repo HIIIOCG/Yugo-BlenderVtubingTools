@@ -48,6 +48,7 @@ class ActionSpec:
     cancel: object = None
     inputs: tuple = ("Enter",)
     configuration: object = None
+    policy_inputs: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +150,7 @@ def _resolve(reference, database):
 
 
 def resolve_object(reference):
-    return _resolve(reference, bpy.data.objects)
+    return _resolve(reference, getattr(bpy.data, 'objects', ()))
 
 
 def node_owner(module_id, node, scene=None):
@@ -161,7 +162,7 @@ def node_owner(module_id, node, scene=None):
 
 
 def _prune_claims():
-    live = {(obj.session_uid, obj.as_pointer()) for obj in bpy.data.objects}
+    live = {(obj.session_uid, obj.as_pointer()) for obj in getattr(bpy.data, 'objects', ())}
     for key in tuple(_claims):
         if key[0] != _epoch or key[1:3] not in live:
             _claims.pop(key, None)
@@ -170,8 +171,8 @@ def _prune_claims():
 def claim_transforms(owner, objects):
     """Atomically claim all object transforms, or leave every claim unchanged.
 
-    This protocol arbitrates participating feature writers. It does not change
-    transforms or arbitrate the existing bone/shape-key Apply protocol.
+    An armature claim also reserves its entire pose against existing bone Apply
+    writers. Unclaimed armatures keep their existing per-bone arbitration.
     """
     if not isinstance(owner, str) or not owner:
         raise ValueError("A non-empty owner is required")
@@ -180,11 +181,22 @@ def claim_transforms(owner, objects):
         if not isinstance(obj, bpy.types.Object) or resolve_object(object_ref(obj)) is None:
             raise ValueError("Claim an existing original Blender object")
         requested.add((_epoch, int(obj.session_uid), int(obj.as_pointer()), "transform"))
+        if obj.type == 'ARMATURE':
+            from . import flow, runtime
+            if flow.pose_writers(obj) or runtime.pose_writers(obj):
+                raise ResourceConflict('Another Apply node already controls this armature pose')
     _prune_claims()
     if any(key in _claims and _claims[key] != owner for key in requested):
         raise ResourceConflict("Another feature already controls an object transform")
     for key in requested:
         _claims[key] = owner
+
+
+def transform_owner(obj):
+    """Return the current exclusive object/armature owner, or None."""
+    if not isinstance(obj, bpy.types.Object):
+        return None
+    return _claims.get((_epoch, int(obj.session_uid), int(obj.as_pointer()), 'transform'))
 
 
 def release_owner(owner):
@@ -284,8 +296,8 @@ class ActionContext:
         self.input_name = task["input_name"]
         self.now = float(now)
         self.delta_time = max(0.0, self.now - task.get("updated", task["created"]))
-        self.tree = _resolve(task["tree_ref"], bpy.data.node_groups)
-        self.scene = _resolve(task["scene_ref"], bpy.data.scenes)
+        self.tree = _resolve(task["tree_ref"], getattr(bpy.data, 'node_groups', ()))
+        self.scene = _resolve(task["scene_ref"], getattr(bpy.data, 'scenes', ()))
         self.node = next((node for node in self.tree.nodes if str(getattr(node, "runtime_id", "")) == task["node"]), None) if self.tree else None
         self._payload = workflow.payload(self.run_id)
         self._evaluation = flow.PullContext(self.tree, self.scene, self.now, self.delta_time) if self.tree and self.scene else None
@@ -359,6 +371,11 @@ def register_module(spec):
         raise ValueError("Duplicate evaluator or action declaration")
     if any(not isinstance(value, ActionSpec) or not callable(value.start) for value in spec.actions.values()):
         raise TypeError("Actions require callable ActionSpec.start")
+    if any(value.policy_inputs is not None and
+           (not isinstance(value.policy_inputs, tuple) or
+            any(name not in value.inputs for name in value.policy_inputs))
+           for value in spec.actions.values()):
+        raise ValueError('Action policy_inputs must be a tuple of declared action inputs')
     if any(node_id not in ids for node_id in (*spec.evaluators, *spec.actions)):
         raise ValueError("Modules may only dispatch their own declared classes")
     if any(not isinstance(value, CardSpec) for value in spec.cards.values()):

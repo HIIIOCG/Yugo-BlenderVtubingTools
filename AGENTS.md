@@ -14,16 +14,23 @@ require a new approval for routine work already authorized by the user.
   `tests/yugo/`. Repository governance tests are in `tests/governance/`. Preserve its
   package ID, existing releases, and working runtime while preparing the Node
   transition.
-- Yugu Node Studio is the intended direction for new development.
-  `addons/yugu_node_studio/` currently contains an explanatory README only.
-  Task #2 imports the real source after repository-layout task #8 is merged;
-  Node tests belong in `tests/yugu_node_studio/`. Do not add fake package code,
-  describe planned modules as implemented, or start the import in an old layout.
-  Tasks #3 and #4 still wait for the qualified #2 baseline.
+- Yugu Node Studio is the main source for new development.
+  Task #2 imported the qualified 0.6.0 baseline through merged PR #15 after
+  repository-layout task #8. Runtime and assets live in `addons/yugu_node_studio/`;
+  Node tests live in `tests/yugu_node_studio/`. Read the source and
+  `docs/development/NODE_BASELINE.md` before relying on an interface. Do not
+  describe planned modules or adapters as implemented. Task #3's qualified
+  public feature API merged through PR #18; read
+  `docs/architecture/PUBLIC_API.md` before implementing a consumer. Task #16's
+  0.7.0 release candidate integrates Floating UI, Prop Physics, and native
+  Ragdoll Motion through this API. Ragdoll uses typed pose values and whole-rig
+  ownership; stop/release existing pose controllers before starting it.
+  Final candidate qualification and publication are recorded separately;
+  do not infer a published release from source integration.
 - Do not synchronize or overwrite live files in another checkout or the shared
-  `motion_codedev/yugo*` folders. After the Node import, Git task workspaces become
-  the development source of truth; the former source folders are reference
-  snapshots until an explicit migration task retires them.
+  `motion_codedev/yugo*` folders. Git task workspaces are the development source
+  of truth; the former source folders remain reference snapshots until an
+  explicit migration task retires them.
 
 ## Start and own a task
 
@@ -61,6 +68,10 @@ require a new approval for routine work already authorized by the user.
 - Run checks appropriate to the change and report exact commands, results,
   baseline/commit, and prerequisites. Never call an unrun, skipped, or failing
   integration test passed.
+- Studio uses `scripts/node_check_version.py`, `scripts/node_build.py`, and
+  `scripts/node_run_checks.py`; the last command supports `--list`. Build from
+  `addons/yugu_node_studio/` and test that actual ZIP in the task's workspace.
+  The legacy build and version scripts continue to target `addons/yugo/`.
 - Use task-specific Blender user/config/script directories, logs, generated
   packages, copied `.blend` fixtures, and network ports. Reserve unavoidable
   shared resources in the task record; wait for their recorded owner to finish.
@@ -84,8 +95,8 @@ require a new approval for routine work already authorized by the user.
   packages. Task branches must not invent competing version bumps.
 - A `v*` tag currently triggers the legacy release workflow. Keep existing
   release tags and assets immutable; a corrected release gets a new version.
-  Node package/tag routing must be established by the migration/release task
-  before publishing a Node release.
+  Studio's version checker accepts only `studio-v<version>` tags. The integration
+  role must verify the Studio release route and exact candidate before publishing.
 - Agent instructions and scope checks are coordination gates, not an operating
   system sandbox. GitHub branch protection and an atomic resource/lease service
   are not guaranteed by these files; do not claim they are active without

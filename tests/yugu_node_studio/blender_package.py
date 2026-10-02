@@ -44,6 +44,39 @@ with zipfile.ZipFile(archive) as package:
         for _menu, entries in module.nodes.NODE_MENU[5:]:
             for node_type, _label in entries:
                 tree.nodes.new(node_type)
+        assert set(module.extensions.registered_modules()) == {'floating_ui', 'physics', 'ragdoll'}
+        for _menu, entries in module.extensions.menu_entries():
+            for node_type, _label in entries:
+                tree.nodes.new(node_type)
+        floating = sys.modules[module.__name__ + '.modules.floating_ui']
+        example_tree, message, display = floating.create_example(bpy.context)
+        floating.send_message(message, bpy.context.scene, now=0)
+        module.scheduler.run_motion_once()
+        visible = floating.get_service(display, bpy.context.scene)
+        assert visible is not None and visible.instances, 'Packaged Floating UI did not insert a native row'
+        physics = sys.modules[module.__name__ + '.modules.physics']
+        physics_example = physics.create_example(bpy.context.scene)
+        module.flow.emit_event(physics_example['tree'], physics_example['controls'], 'Start', now=1)
+        module.scheduler.run_motion_once()
+        assert physics.service.active(), 'Packaged Physics World did not start'
+        module.flow.emit_event(physics_example['tree'], physics_example['controls'], 'Stop', now=2)
+        module.scheduler.run_motion_once()
+        assert not physics.service.active(), 'Packaged Physics World did not stop'
+        ragdoll = sys.modules[module.__name__ + '.modules.ragdoll']
+        ragdoll_example = ragdoll.create_example(bpy.context.scene)
+        ragdoll_run = module.flow.emit_event(ragdoll_example['tree'], ragdoll_example['controls'], 'Enter')
+        assert module.workflow.status(ragdoll_run)['state'] == 'running'
+        for _step in range(20):
+            module.scheduler.run_motion_once(1 / 60)
+        def ragdoll_status():
+            return module.runtime.EvaluationContext(ragdoll_example['tree'], bpy.context.scene, 0).evaluate(
+                ragdoll_example['apply'])['Status']
+        snapshot = ragdoll_status()
+        assert snapshot['elapsed'] > .2 and snapshot['status'] in {'PHYSICS', 'RECOVERING'}
+        assert ragdoll_status() == snapshot, 'Packaged ragdoll reads advanced physics'
+        module.flow.emit_event(ragdoll_example['tree'], ragdoll_example['controls'], 'Stop')
+        module.scheduler.run_motion_once()
+        assert module.workflow.status(ragdoll_run)['state'] == 'cancelled'
         sample, definition = module.workflow_ui.build_demo("Packaged stage one")
         assert module.workflow_ui.cards_from_graph(definition).supported
         start = next(node for node in sample.nodes if node.label == "Start sample")
@@ -66,7 +99,11 @@ with zipfile.ZipFile(archive) as package:
         outline_material = module.studio.outline_bake._append_outline_material()
         assert outline_material.name.startswith("Black_OutlineFast")
         bpy.data.materials.remove(outline_material)
+        pending = module.flow.emit_event(ragdoll_example['tree'], ragdoll_example['controls'], 'Enter')
+        assert module.workflow.status(pending)['state'] == 'running'
         with RestrictBlend():
             module.unregister()
+        assert not module.extensions.lifecycle_errors()
+        assert not module.extensions.claimed_transforms()
         assert not hasattr(bpy.types.Scene, "yugu_node_studio_tree")
 print("YUGU_STUDIO_PACKAGE_OK")

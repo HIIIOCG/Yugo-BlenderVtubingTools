@@ -1,6 +1,6 @@
 # Yugu Node Studio qualified 基準
 
-日期：2026-10-02。任務 #2 已完成來源導入與本機 qualification；GitHub PR/CI 和主線合併是下一個整合關卡。
+日期：2026-10-02。任務 #2 已完成來源導入與 qualification，已由 [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15) 合併主線 `f3857a2e329358f41d90e8c92c422c9339db434b`。GitHub 的 Studio、legacy、scope 三條檢查全部通過（runs 37003243228、37003243114、37003242995）。
 
 ## 固定來源
 
