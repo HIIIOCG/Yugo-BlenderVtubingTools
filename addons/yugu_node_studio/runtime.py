@@ -409,6 +409,11 @@ def _evaluate_node(context, node):
         )
         return _output(node, output_socket.name, value)
 
+    from . import extensions
+    feature_result = extensions.evaluate(context, node)
+    if feature_result is not None:
+        return feature_result
+
     if kind == "YUGUS_NODE_vrm_data":
         from .targets import Armatures, Objects
         snapshot = vrm_cache.get_snapshot(node)
