@@ -1,173 +1,63 @@
-# Yugo 0.1.26
+# Yugo / Yugu Node 開發中心
 
-Yugo targets Blender 5.1. Motion Layers combine VMC/OSC, iFacialMocap,
-Blender Action, keyboard expression, and VRM Spring Bone sources across
-multiple VRM avatars. Bone motion is converted to quaternions and combined from
-lower to higher priority with Replace, Layer Weight, Solo, and per-region
-Humanoid Mask controls.
+這個 repository 是 Yugo 系列的正式程式、規範、任務與整合入口。後續新功能以 **Yugu Node Studio** 為主體；每個開發聊天使用獨立分支與工作副本，完成後經過 PR 與整合驗證。
 
-The integrated Composing panel installs the bundled MainFX frames from the
-combined `preset.blend` into the active Scene compositor. Enabling
-YugoComp targets Cryptomatte to every Mesh driven by the Avatar List's active
-VRM armature, enables the required Object, Material, Ambient Occlusion, and
-Depth passes, and exposes Scene Color Blend, Ambient Occlusion, Rim Light,
-Separated Rim, Secondary Shadow, Separated Shadows, Gradient Color, Dark Bloom,
-and Light Bloom controls. Parameter edits update only their matching nodes.
-For performance, every Avatar shares one Scene-level set of Composing parameters
-and MainFX nodes. The first enabled Avatar initializes those values from the
-preset once. Later Avatar toggles only add or remove their bound Mesh names from
-the shared Cryptomatte matte ID.
-The final MainFX Image socket feeds both the Scene Group Output and one active,
-unmuted YugoComp Viewer node. Reloading YugoComp reconnects and reuses that
-Viewer instead of creating duplicates or changing user-owned Viewer nodes.
+## 目前狀態
 
-The Add button creates sequential empty gray layers named `MotionLayer 01`,
-`MotionLayer 02`, and so on, with Source Type set to None. Choosing the first
-source assigns its default label color and replaces an untouched default name
-with the selected source name and matching number. Later source changes preserve
-the user's name and color.
+| 項目 | 狀態 | 入口 |
+| --- | --- | --- |
+| 多對話開發規範與工作副本工具 | 已建立；適用後續開發 | [AGENTS.md](AGENTS.md)、[並行流程](docs/development/PARALLEL_DEVELOPMENT.md) |
+| Yugu Node Studio 0.6.0 | 本機交付已完成，來源導入與測試整理待完成 | [基準盤點](docs/development/NODE_BASELINE.md)、[任務 #2](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues/2) |
+| Node 擴充介面與模組邊界 | 設計目標，尚未實作完整 registry | [架構規範](docs/architecture/NODE_SYSTEM.md)、[任務 #3](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues/3) |
+| 舊 Yugo 0.1.26 | 根目錄仍是舊版 extension，保留既有建置與發布 | [舊版功能與安裝](docs/legacy/YUGO_0_1_26.md)、[Release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.1.26) |
 
-The Source Type menu is one flat list. Rokoko, Leap Motion, MeddiaPipe,
-SteamVR, and Mocopi appear at the same level as implemented sources, but remain
-disabled until their integrations are available.
+Node 原始碼尚未匯入此 repository。先完成任務 #2，才開始依賴新 Node 程式的功能開發。本機完成、repository 已納入、測試合格及正式發布是不同狀態。
 
-Composing, MToon Optimize, and shared visual assets use the single bundled
-`preset.blend` file.
+## 老闆與開發聊天的入口
 
-The Optimize button below VRM Armature opens a selected-object summary and
-MToon, Mesh, Outline to Mesh, and Collection Arrange option dialog. MToon
-installs the bundled `_MToonCustom` Eevee preview block and synchronizes it at
-2 Hz while preserving the native VRM MToon output for export. Shadow Mix multiplies
-the official MToon Shade Color RGB value once, before the custom nodes are
-installed, and defaults to 0.5. It is not evaluated by the ongoing 2 Hz
-material synchronization. Transparent and
-Cutout MToon materials are also switched to Blender's Blended render method;
-Opaque materials are preserved. Mesh is enabled by default and runs Blender's
-direct Merge by Distance and Edit Mode Decimate Geometry operations in that
-order, leaving no Decimate modifier behind. Its default Decimate Ratio is 0.5.
-Meshes containing Shape Keys are skipped to preserve VRM expressions. Outline
-to Mesh is also enabled by default. It bakes selected VRM Add-on MToon Geometry
-Nodes previews into independent `*_OutlineMesh` objects using the shared
-`Black_OutlineFast` material from `preset.blend`, preserves source-driven Shape
-Keys, and disables the matching preview outline. Collection Arrange creates an
-avatar-named hierarchy with separate `_mesh`, `_vrm0_collider`, and
-`_vrm1_collider` collections, then removes an emptied VRM Add-on `Colliders`
-collection.
+- [任務看板](docs/development/TASK_BOARD.md)：現在該做什麼、哪些工作需要先完成。
+- [開對話順序與可直接貼上的指令](docs/development/CHAT_STARTERS.md)：由技術角色自行處理分支、測試與整合。
+- [GitHub Issues](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)：任務範圍、依賴、狀態與認領紀錄。
+- [Pull requests](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pulls)：成果、驗證与整合紀錄。
 
-No UI Window opens an independent presentation viewport above Fast Started. It
-continuously follows the scene's active camera and automatically applies a
-Cover crop whenever the window or render aspect changes. Rendered, Material
-Preview, Solid, and Wireframe shading remain available in its adjacent settings
-button. The same popup includes Disabled, Camera, and Always viewport Compositor
-modes, with Always as the default; running No UI Windows update immediately.
-The opening Workspace is locked to the presentation window, so switching the
-main Blender Workspace or accidentally invoking a Workspace shortcut over the
-second window cannot replace its clean camera view. Blender headers, sidebars,
-toolbars, gizmos, overlays, HUD content, and the status bar are hidden.
+所有開發聊天先讀 AGENTS.md。技術統籌分配任務，處理共用核心變更、整合與正式發布；功能聊天只修改自己的工作副本及登記範圍。任務與共用資源認領由統籌角色依序確認。
 
-The iFacialMocap source includes live neutral-pose calibration, optional
-left/right mirroring, and normal/inverted body-rotation profiles that distribute
-pitch, yaw, and roll across the VRM Head, Neck, Chest, and Spine mappings. VMC
-supports Root and Humanoid bone transforms with Raw and Smooth data modes.
-Blender Actions are sampled non-destructively from Blender 5.1 Action Slots and
-do not replace the avatar's assigned Action or NLA data.
+## 開發空間
 
-VMC targets are resolved from stable Motion Layer IDs before every timer write.
-Removing or rebuilding a Layer no longer leaves the receiver holding an invalid
-Blender RNA reference. Live VMC receiver and Motion Mixer caches also use those
-stable IDs, so reordering running VMC and Spring Physics layers does not detach
-the VMC stream or stop its bone output. When a connected Hips bone must be
-edited at startup, Yugo temporarily reveals an Armature hidden with the Outliner
-eye and restores the exact visibility state afterwards, so a hidden rig remains
-a valid Motion Layer target.
+| 位置 | 責任 |
+| --- | --- |
+| AGENTS.md | 所有聊天的共同規則 |
+| docs/development/ | 任務、開工、驗證與交付 |
+| docs/architecture/ | Node 介面與模組責任 |
+| docs/legacy/ | 舊 Yugo 文件 |
+| scripts/start_task.py | 建立分支與獨立 worktree |
+| scripts/check_task_scope.py | 檢查工作位置與變更範圍 |
+| .github/ | 任務與 PR 範本、規範檢查、建置及發布 |
+| yugu_node_studio/ | 任務 #2 完成後的新來源目錄，目前尚不存在 |
+| 根目錄 extension 檔案 | 目前保留的舊 Yugo 0.1.26 |
 
-Spring Bone is represented by a Motion Layer but evaluates in the Motion
-Mixer's final post-mix stage, so physics always receives the completed avatar
-pose. VRM 0.x and VRM 1.0 are supported, including multiple avatars, overall
-Layer Weight, Reset, hit-radius display, and Undo/Redo-safe runtime rebinding.
-VRM 1.0 uses Yugo's cached internal solver and keeps the VRM Add-on animation
-handler disabled while the Layer runs. Editable Spring settings are checked at
-2 Hz and the cache is rebuilt only when their signature changes. Following the
-FastSpringBone Pull-Solve-Push model, each pose snapshot performs one synchronous
-dependency update before reading pose matrices. Final output only writes bones
-whose rotations changed and leaves tagged-pose evaluation to Blender's event
-loop, so interpolated 60 Hz output no longer forces a second whole-scene update.
-Low-rate solving keeps previous and current quaternion buffers entirely inside
-Yugo. Solvers return rotations without touching Blender pose bones; the 60 Hz
-display pass performs SLERP and writes each controlled bone at most once. This
-removes the former full-pose restore, solve write, and interpolated rewrite.
-Each VRM Physics layer has Auto, 60, 30, 24, 16, 14, 12, and 8 FPS pose-sync
-rates. Auto resolves to 24 FPS. Every rate advances one fixed 1/60-second Verlet
-step per Yugo mixer tick, so drag, gravity, stiffness, and oscillation strength
-do not weaken at low rates. Wall-clock lag never triggers multiple catch-up
-steps, avoiding the solve feedback loop that could lower viewport FPS further.
-Rates below 60 only reduce synchronous Blender pose pulls and use quaternion
-SLERP for the displayed output. Full Layer Weight skips the separate pre-physics
-rotation snapshot used only by partial-weight blending.
+工作副本、Blender profile、暫存輸出與 .dev/task.json 是本機資料，不提交 GitHub。工作副本隔離檔案；介面規格與最新主線整合測試處理功能相容性。這套工具不是作業系統的權限沙箱。
 
-Yugo runtime work is coordinated by two reload-safe main-thread schedulers.
-The 60 Hz Motion Loop runs VMC, iFacialMocap, Keybinds, the Motion Mixer, and
-then Spring Bone in a deterministic order, so sources no longer race through
-independent timers. The 2 Hz System/UI Loop maintains installed MToon preview
-materials and No UI Windows. Yugo no longer uses a depsgraph update handler for
-MToon synchronization. Undo, Redo, Load, and one-shot window/data migration
-work remain event-driven and are not delayed by the 2 Hz loop.
-The scheduler lifetime is tracked with module-local timer identity rather than
-Blender's volatile `driver_namespace`, so loading a `.blend` cannot leave VMC,
-iFacialMocap, or Spring Physics showing Connected while the Motion Loop has
-silently stopped. Spring post-mix callbacks are retained in the same reload-safe
-runtime state. Transient RNA rebuild errors are rate-limited and retried on the
-next cycle instead of permanently removing a connected subsystem.
-Before Blender replaces the current file, Yugo suspends both scheduler loops,
-closes VMC and iFacialMocap sockets and their receiver thread, releases the
-Keybind and Spring runtimes, and discards all cached Scene, Layer, Armature, and
-pose references without writing through RNA that is being destroyed. The loops
-resume only from `load_post`; live connections intentionally do not carry across
-different `.blend` files.
+## 開工與驗證
 
-The integrated **Cam Manager** is a default-collapsed panel at the bottom of
-Yugo. It automatically lists Scene cameras and provides None, Pan Follow,
-Around Follow, and Custom presets. Per-axis critically damped Camera Location,
-weighted Object/Bone targets, Position/Rotation follow, Target Solo and Smooth,
-aspect-aware Target Offset, Lock Distance, diagnostic target snapshots, and
-Hold/Trigger camera-view movement keybinds are included. Pan/Around presets can
-resolve the active Yugo Avatar's VRM Head bone. Camera motion runs after the
-final Motion Mixer and Spring pose on the shared 60 Hz Motion Loop. Camera-list
-maintenance uses the shared 2 Hz System/UI Loop, and no standalone Camera timer
-or depsgraph handler is registered. Active Camera runtime references are safely
-released during `.blend` replacement. The former standalone `yugo_cam`
-Extension should be disabled or uninstalled after upgrading.
+使用 Python 3.11+，從乾淨且已同步 origin/main 的 repository 建立工作副本。完整步驟在 [並行流程](docs/development/PARALLEL_DEVELOPMENT.md)。
 
-## Modules
+```powershell
+python -B scripts/start_task.py --task 2 --slug node-baseline --role integration --scope "yugu_node_studio/**" --scope "scripts/node_*" --scope ".github/workflows/node*.yml" --scope "blender_manifest.toml" --scope "docs/development/NODE_BASELINE.md" --workspace-root "D:/Github/Yugo-workspaces"
+```
 
-- `properties.py`: avatar, layer, source, and humanoid-mask data
-- `operators.py`: add, remove, reorder, and source connection actions
-- `ui_lists.py`: compact layer list rows
-- `panels.py`: VRM Avatar, Motion Layers, Source Settings, and Humanoid Mask UI
-- `vrm.py`: safe VRM Add-on metadata lookup
-- `avatar_status.py`: VRM version, humanoid mapping, and ARKit bind validation
-- `mtoon_optimize.py`: selected-object MToon preview optimization and syncing
-- `object_optimize.py`: direct mesh geometry optimization and avatar collection arrangement
-- `outline_bake.py`: safe MToon outline baking with source-driven Shape Keys
-- `composing/`: integrated MainFX compositor UI, runtime, and updated preset
-- `view_window.py`: independent clean camera viewport creation and configuration
-- `ifacialmocap/`: iPhone UDP/TCP protocol, VRM expression, and head driver
-- `vmc/`: OSC/VMC UDP decoding, VRM Humanoid mapping, and live receiver
-- `blender_action.py`: Blender 5.1 Action Slot sampling
-- `motion_mixer.py`: shared lower-to-higher priority Replace mixer
-- `scheduler.py`: ordered 60 Hz Motion and 2 Hz System/UI main-thread loops
-- `camera.py`: integrated multi-camera follow, targets, dampers, and keybinds
-- `keybinds/`: Hold/Trigger/Solo keyboard shortcuts and VRM expression Mask Locks
-- `springbone/`: cached internal VRM 1.0 and legacy VRM 0.x Spring physics
+後續操作全部使用工具輸出的工作副本路徑。提交前執行：
 
-## Install
+```powershell
+python -B scripts/check_task_scope.py
+python -B scripts/check_version.py
+python -B -m unittest discover -s scripts/tests -p "test_*.py"
+```
 
-1. Download `yugo-0.1.26.zip` from the GitHub release.
-2. In Blender 5.1, open **Edit > Preferences > Extensions**.
-3. Open the menu in the upper-right corner and choose **Install from Disk**.
-4. Select the downloaded ZIP and enable Yugo if needed.
-5. Open the 3D Viewport sidebar and select the **Yugo** tab.
+PR 必須附上與 GitHub 任務卡一致的 task-scope 區塊。CI 檢查變更範圍與必要規範。主線保護是否啟用以 GitHub 實際設定為準；角色宣告本身不是帳號權限隔離。
 
-## License
+## 舊版安裝與授權
 
-Yugo is free software licensed under [GPL-3.0-or-later](LICENSE).
+舊 Yugo 使用 Blender 5.1+；[下載與功能說明](docs/legacy/YUGO_0_1_26.md) 保留完整 0.1.26 文件。Node 與舊版的 addon ID、建置來源與版本標籤分開管理；來源導入不會自動發布新 Node。
+
+本專案採 [GPL-3.0-or-later](LICENSE)。貢獻前請閱讀 [CONTRIBUTING.md](CONTRIBUTING.md)。

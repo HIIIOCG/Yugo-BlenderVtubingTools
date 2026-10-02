@@ -20,6 +20,13 @@ venv/
 .vscode/
 .idea/
 
+# Per-chat workspaces, task records and isolated Blender state
+/.workspaces/
+/.dev/
+/workspaces/
+/artifacts/
+/blender-profile/
+
 # Operating system files
 .DS_Store
 Thumbs.db

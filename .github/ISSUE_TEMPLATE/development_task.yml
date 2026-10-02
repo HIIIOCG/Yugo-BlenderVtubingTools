@@ -1,0 +1,56 @@
+name: 開發任務 / Development task
+description: 登記有明確範圍、依賴與完成條件的開發任務
+title: "[Task]: "
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 目標與完成條件
+      description: 說明使用者會得到什麼，以及可驗證的完成條件
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: 任務角色
+      options: [feature, core, docs, integration]
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 允許修改路徑
+      description: 每行一個 repository 相對路徑／範圍，由統籌確認後補上 task-scope JSON
+      placeholder: "yugu_node_studio/modules/example/**"
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依賴與共用介面
+      description: 前置 Issue、共用資料／節點／流程介面；沒有則填「無」
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: 認領紀錄
+      description: 負責聊天、分支、worktree 絕對路徑、起始 commit 與狀態；未認領填「待認領」
+    validations:
+      required: true
+  - type: textarea
+    id: resources
+    attributes:
+      label: 測試與資源
+      description: 驗證方式、Blender profile／場景／輸出、需要預約的設備或網路
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: 開工前確認
+      options:
+        - label: 我會遵守 AGENTS.md，使用任務自己的工作副本
+          required: true
+        - label: 我會列出尚未實作或尚未通過的項目
+          required: true

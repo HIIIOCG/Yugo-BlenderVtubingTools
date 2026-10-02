@@ -1,14 +1,37 @@
-## Summary
+## Problem and result / 問題與結果
 
-Describe the user-visible change and why it is needed.
+Describe the concrete trigger, resulting behavior, and why it is needed.
 
-## Validation
+## Task scope / 任務範圍
 
-- [ ] `python scripts/check_version.py`
-- [ ] Blender extension source validation passes
-- [ ] The built ZIP installs and enables in Blender 5.1
-- [ ] Relevant Blender integration tests or manual checks pass
+Replace this block with the exact declaration from the assigned GitHub Issue.
+task_id is the Issue number. Roles: docs, feature, core, integration.
+List the narrowest required repository-relative paths.
 
-## Notes
+```task-scope
+{"task_id": 0, "role": "feature", "allowed_paths": ["yugu_node_studio/modules/example/**"]}
+```
 
-List compatibility concerns, screenshots, or follow-up work.
+Task: #0
+Dependencies and shared interfaces:
+
+## Validation / 驗證
+
+- [ ] Working directory and branch match the assigned isolated workspace
+- [ ] python -B scripts/check_task_scope.py
+- [ ] Relevant automated / Blender checks pass (list actual commands and results)
+- [ ] Latest-main integration candidate checked by integration owner before merge
+
+Checks run and results:
+
+Checks not run / known failures (reason and tracking Issue):
+
+## Compatibility and delivery / 相容性與交付
+
+Node IDs, socket IDs, saved graphs, assets and runtime lifecycle affected:
+
+Screenshots or examples, if useful:
+
+Release / version changes (integration owner only):
+
+Closes #0

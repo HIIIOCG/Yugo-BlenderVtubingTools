@@ -48,7 +48,8 @@ jobs:
         run: |
           package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$package" --clobber
+            echo "::error::Existing releases are immutable; create a new product version"
+            exit 1
           else
             gh release create "$GITHUB_REF_NAME" "$package" \
               --title "Yugo ${{ steps.metadata.outputs.version }}" \
