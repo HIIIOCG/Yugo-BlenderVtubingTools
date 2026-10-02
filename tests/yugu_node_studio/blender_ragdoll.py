@@ -133,6 +133,31 @@ def native_pose_and_repeated_hits():
         fixture.close()
 
 
+def registered_socket_draw_callbacks():
+    fixture = Fixture()
+    try:
+        class Labels:
+            def __init__(self):
+                self.values = []
+
+            def label(self, *, text):
+                self.values.append(text)
+
+        samples = ((fixture.source.outputs["Pose"], fixture.source, (.7, .5, .85, 1)),
+                   (fixture.motion.outputs["Motion"], fixture.motion, (.7, .5, .85, 1)),
+                   (fixture.motion.outputs["Status"], fixture.motion, (.3, .75, .5, 1)))
+        for socket, node, expected in samples:
+            assert callable(getattr(type(socket), "draw", None)), socket.bl_idname
+            assert callable(getattr(type(socket), "draw_color", None)), socket.bl_idname
+            labels = Labels()
+            socket.draw(bpy.context, labels, node, "Registered socket")
+            socket.draw(bpy.context, labels, node, "")
+            assert labels.values == ["Registered socket", socket.name]
+            assert tuple(socket.draw_color(bpy.context, node)) == expected
+    finally:
+        fixture.close()
+
+
 def truthful_completion_and_completed_resume():
     fixture = Fixture()
     try:
@@ -468,7 +493,7 @@ def saved_lifecycle_and_cards():
         fixture.close()
 
 
-for test in (native_pose_and_repeated_hits, truthful_completion_and_completed_resume,
+for test in (registered_socket_draw_callbacks, native_pose_and_repeated_hits, truthful_completion_and_completed_resume,
              recover_cancel_hit_and_restart, timeout_and_existing_apply_arbitration,
              command_inputs_respect_enter_policies,
              topology_config_and_competing_writer, bone_structure_guard_and_sampling_after_cancel,

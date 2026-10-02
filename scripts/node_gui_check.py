@@ -39,7 +39,9 @@ def main():
     content = result.stdout + result.stderr
     (output / 'gui.log').write_bytes(content)
     report = output / 'gui-result.json'
-    if result.returncode or b'Traceback (most recent call last)' in content or not report.is_file():
+    errors = (b'Traceback (most recent call last)', b'ERROR Python script error',
+              b'could not find function', b'Yugo scheduler callback')
+    if result.returncode or any(marker in content for marker in errors) or not report.is_file():
         print(content.decode('utf-8', errors='replace')[-5000:])
         raise SystemExit('Studio GUI did not produce fresh passing evidence.')
     record = json.loads(report.read_text(encoding='utf-8'))

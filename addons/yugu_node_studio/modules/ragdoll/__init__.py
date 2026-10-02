@@ -36,10 +36,9 @@ class MotionValue:
     impulse: tuple
 
 
-class YUGUS_NS_ragdoll_pose(_YUGUS_SocketBase, bpy.types.NodeSocket):
-    bl_idname = POSE
-    bl_label = "Native Ragdoll Pose"
-
+class _RagdollSocketDrawing:
+    # Share drawing through a plain Python mixin. Registered RNA socket classes
+    # must not inherit each other: later registration can remove base callbacks.
     def draw(self, context, layout, node, text):
         layout.label(text=text or self.name)
 
@@ -47,12 +46,17 @@ class YUGUS_NS_ragdoll_pose(_YUGUS_SocketBase, bpy.types.NodeSocket):
         return (.7, .5, .85, 1)
 
 
-class YUGUS_NS_ragdoll_motion(YUGUS_NS_ragdoll_pose):
+class YUGUS_NS_ragdoll_pose(_RagdollSocketDrawing, _YUGUS_SocketBase, bpy.types.NodeSocket):
+    bl_idname = POSE
+    bl_label = "Native Ragdoll Pose"
+
+
+class YUGUS_NS_ragdoll_motion(_RagdollSocketDrawing, _YUGUS_SocketBase, bpy.types.NodeSocket):
     bl_idname = MOTION
     bl_label = "Ragdoll Motion"
 
 
-class YUGUS_NS_ragdoll_status(YUGUS_NS_ragdoll_pose):
+class YUGUS_NS_ragdoll_status(_RagdollSocketDrawing, _YUGUS_SocketBase, bpy.types.NodeSocket):
     bl_idname = STATUS
     bl_label = "Ragdoll Status"
 
