@@ -19,6 +19,7 @@ def isolated_environment(folder: Path) -> dict[str, str]:
                         ('BLENDER_USER_SCRIPTS', 'scripts'),
                         ('BLENDER_USER_DATAFILES', 'datafiles'),
                         ('BLENDER_USER_EXTENSIONS', 'extensions'),
+                        ('LOCALAPPDATA', 'local-appdata'), ('XDG_CACHE_HOME', 'cache'),
                         ('TEMP', 'temp'), ('TMP', 'temp'), ('TMPDIR', 'temp')):
         path = profile / child
         path.mkdir(parents=True, exist_ok=True)

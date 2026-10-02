@@ -36,6 +36,30 @@ def no_handlers():
     assert preview._check_handler not in bpy.app.handlers.depsgraph_update_post
 
 
+def socket_callbacks(tree, source, motion):
+    # Registered RNA socket subclasses can remove their parent's callbacks.
+    # Exercise the native instances after every complete class registration.
+    class Labels:
+        def __init__(self):
+            self.text = []
+
+        def label(self, *, text):
+            self.text.append(text)
+
+    trigger = next(node for node in tree.nodes if node.bl_idname == preview.TRIGGER_ID)
+    for socket, node in ((source.outputs["Pose"], source),
+                         (motion.outputs["Motion"], motion),
+                         (motion.outputs["Status"], motion),
+                         (trigger.outputs["Tick"], trigger)):
+        assert callable(getattr(socket, "draw", None)), socket.bl_idname
+        assert callable(getattr(socket, "draw_color", None)), socket.bl_idname
+        layout = Labels()
+        socket.draw(bpy.context, layout, node, socket.name)
+        assert layout.text == [socket.name]
+        color = socket.draw_color(bpy.context, node)
+        assert len(color) == 4 and all(0 <= value <= 1 for value in color)
+
+
 obj = make_armature("Restricted lifecycle fixture")
 sid = service.start(obj, settings={"auto_recover": False})
 service.hit(sid, "hips", (1, 0, .5))
@@ -61,6 +85,7 @@ for cycle in range(3):
         assert getattr(bpy.app.handlers, label).count(preview._cleanup_handler) == 1
     assert bpy.app.handlers.depsgraph_update_post.count(preview._check_handler) == 1
     tree, source, motion, apply = make_graph(obj)
+    socket_callbacks(tree, source, motion)
     motion.auto_recover = False
     source.bone_names = "hips,spine,chest,neck,head"
     home = capture(obj)

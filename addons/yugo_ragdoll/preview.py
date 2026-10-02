@@ -340,9 +340,12 @@ class TickSocket(bpy.types.NodeSocket):
         return (.85, .12, .1, 1)
 
 
-class StatusSocket(PoseSocket):
+class StatusSocket(bpy.types.NodeSocket):
     bl_idname = "YUGORAG_NS_status"
     bl_label = "Ragdoll Status"
+
+    def draw(self, _context, layout, _node, text):
+        layout.label(text=text)
 
     def draw_color(self, _context, _node):
         return (.3, .7, .45, 1)
