@@ -1,0 +1,25 @@
+schema_version = "1.0.0"
+id = "yugu_node_studio"
+version = "0.6.0"
+name = "Yugu Node Studio"
+tagline = "Humanoid motion nodes with MToon and compositor controls"
+maintainer = "Yugo Contributors"
+type = "add-on"
+
+blender_version_min = "5.1.0"
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+tags = ["Animation", "Rigging"]
+
+[permissions]
+network = "Receive VMC and iFacialMocap motion data"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  ".git",
+  "tests/",
+]
