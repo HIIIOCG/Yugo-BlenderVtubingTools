@@ -1447,26 +1447,19 @@ def _apply_entry(scene, entry, delta_time, now):
         delta_time,
     )
 
-    wrote_matrix = False
-    if (
-        (output_location - location).length > EPSILON
-        or _rotation_difference(output_quaternion, current_quaternion) > EPSILON
-    ):
-        camera.matrix_world = Matrix.LocRotScale(
-            output_location,
-            output_quaternion,
-            current_matrix.to_scale(),
-        )
-        wrote_matrix = True
-    if wrote_matrix:
-        # Cache Blender's accepted matrix, not the requested decomposition.
-        # Parent transforms and constraints can make these differ slightly.
-        written_matrix = camera.matrix_world.copy()
-        state.last_written_location = written_matrix.translation.copy()
-        state.last_written_quaternion = written_matrix.to_quaternion()
-    else:
-        state.last_written_location = location.copy()
-        state.last_written_quaternion = current_quaternion.copy()
+    # Do not gate follower writes by transform distance.  Such a gate turns
+    # continuous sub-epsilon target changes into a visible deadband and jump.
+    # Manual ownership is handled before this point instead.
+    camera.matrix_world = Matrix.LocRotScale(
+        output_location,
+        output_quaternion,
+        current_matrix.to_scale(),
+    )
+    # Cache Blender's accepted matrix, not the requested decomposition.
+    # Parent transforms and constraints can make these differ slightly.
+    written_matrix = camera.matrix_world.copy()
+    state.last_written_location = written_matrix.translation.copy()
+    state.last_written_quaternion = written_matrix.to_quaternion()
 
 
 def tick(scene, delta_time):
@@ -1562,16 +1555,19 @@ def _motion_update(scene, delta_time):
 
 def _sync_runtime_ui(scene):
     """Publish runtime vectors to RNA properties only on the 2 Hz UI path."""
-    if scene is None or not hasattr(scene, "yugo_cam_entries"):
+    try:
+        if scene is None or not hasattr(scene, "yugo_cam_entries"):
+            return
+        for entry in scene.yugo_cam_entries:
+            if entry.camera is None:
+                continue
+            state = _states.get(_state_key(entry))
+            if state is None:
+                continue
+            if (_entry_location(entry) - state.virtual_location).length > EPSILON:
+                _set_entry_location(entry, state.virtual_location)
+    except ReferenceError:
         return
-    for entry in scene.yugo_cam_entries:
-        if entry.camera is None:
-            continue
-        state = _states.get(_state_key(entry))
-        if state is None:
-            continue
-        if (_entry_location(entry) - state.virtual_location).length > EPSILON:
-            _set_entry_location(entry, state.virtual_location)
 
 
 def _system_update(scene, _delta_time):
