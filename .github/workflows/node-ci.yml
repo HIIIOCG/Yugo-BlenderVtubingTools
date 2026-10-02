@@ -1,0 +1,41 @@
+name: Validate Studio
+
+on:
+  push:
+    branches: [main]
+    paths: ["addons/yugu_node_studio/**", "addons/yugo/**", "tests/yugu_node_studio/**", "scripts/node_*", ".github/workflows/node*.yml"]
+  pull_request:
+    paths: ["addons/yugu_node_studio/**", "addons/yugo/**", "tests/yugu_node_studio/**", "scripts/node_*", ".github/workflows/node*.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  studio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: bradyajohnston/setup-blender@v5
+        with:
+          version: "5.1"
+      - name: Check Studio metadata
+        run: python -B scripts/node_check_version.py
+      - name: Build Studio
+        run: python -B scripts/node_build.py --blender "$(command -v blender)"
+      - name: Run portable Studio regressions
+        run: |
+          version=$(python -B scripts/node_check_version.py --print-version)
+          python -B scripts/node_run_checks.py --blender "$(command -v blender)" --package "dist/yugu_node_studio-$version.zip" --output artifacts/node-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-validation
+          path: |
+            dist/yugu_node_studio-*.zip
+            dist/*.sha256
+            dist/studio-build.json
+            artifacts/node-ci/**/test.log
+            artifacts/node-ci/results.json
