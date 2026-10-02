@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "yugo_ragdoll"
+version = "0.1.0"
+name = "Yugo Ragdoll Motion Node Preview"
+tagline = "Jointed ragdoll motion with directed hits and pose recovery"
+maintainer = "Yugo contributors"
+type = "add-on"
+tags = ["Animation", "Node"]
+blender_version_min = "5.1.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", "*.zip", ".git/", "tests/"]
