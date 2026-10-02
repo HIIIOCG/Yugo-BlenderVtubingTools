@@ -9,26 +9,26 @@
 | 項目 | 目前狀態 | 後續規則 |
 | --- | --- | --- |
 | `addons/yugo/` | repository 現有舊產品；manifest ID 為 `yugo`，版本為 0.1.26 | 保留 package ID、既有發布與必要修正 |
-| `addons/yugu_node_studio/` | 目前只有說明；開發來源在 repository 之外，尚未透過 Node bootstrap PR 匯入 | 結構 #8 合併後由 #2 建立合格基準，再成為新開發主線 |
+| `addons/yugu_node_studio/` | #2 已透過 PR #15 導入 qualified 0.6.0 基準，含 runtime、資產、建置及 CI | 新開發以 Git 工作區的 Studio 來源為準 |
 | `yugu_node` | 外部已有另一份 Node 實作 | 當作比較／遷移來源；不建立第二條持續獨立演進的核心 |
 | 任務工作區與範圍檢查 | 本次治理工具提供 worktree 啟動及修改範圍檢查 | 每個實作聊天使用自己的工作區 |
-| 模組 registry／自動載入契約 | 架構規劃，尚未實作 | 由獨立核心任務提出、驗證後才能使用 |
+| 模組 registry／自動載入契約 | #3 核心介面工作進行中；以該 PR 的驗證及合併紀錄為準 | 消費端在介面 qualified 整合後接入 |
 | 中央資源鎖／lease service | 尚未實作 | 先由整合角色登記與排序；有需要再加後端 |
 
-Studio 的來源版本、封裝比較及測試結果以 Node bootstrap Issue／基準稽核
-紀錄為準。來源曾經成功打包不等於所有功能測試通過，也不代表 GitHub 已有
-可安裝的 Studio release。
+Studio 的來源版本、封裝比較及測試結果以 [Node 基準紀錄](../development/NODE_BASELINE.md)
+及各次整合 PR 為準。#2 已通過來源、ZIP 及 portable regressions；正式 release
+另記錄實際發布的 tag、來源 commit、安裝包 checksum 與必要人工驗收。
 
-程式放 `addons/`，功能測試分在 `tests/yugo/` 與待建立的
+程式放 `addons/`，功能測試分在 `tests/yugo/` 與
 `tests/yugu_node_studio/`，工作區工具測試在 `tests/governance/`。外掛必需資產
 保留在各自套件；大測試素材與其交接依[素材指南](../development/TEST_MATERIALS.md)，
-不另建共用素材資料庫。任務 #3 會在 Node 基準匯入後落實功能子分類與公開介面，
-目前不把規劃中的子目錄當成已實作的功能。
+不另建共用素材資料庫。任務 #3 在這個合併基準上落實功能子分類與公開介面；
+規劃中的子目錄仍須以實際來源與通過的驗證為依據。
 
 ## 程式責任要怎麼切
 
-下表是建議的模組責任。Studio 外部來源目前包含同名或相近檔案，但以下
-契約不是宣稱已完成的 refactor；匯入後應先保留行為，再分任務逐步落實。
+下表是建議的模組責任。Studio 已導入同名或相近檔案；各領域的模組化與
+公開契約仍須分任務逐步落實，並保留合併基準的行為。
 
 | 領域 | 責任與邊界 | 主要需要協調的介面 |
 | --- | --- | --- |
@@ -94,18 +94,19 @@ release 路由的改動由 `core` 或 `integration` 任務處理。PR 必須列�
 整合角色對這些修改排序，對最新 `main` 的實際候選做驗證。各聊天的工作區
 互不覆寫，只解決檔案層問題；核心互動仍靠上述契約與整合順序處理。
 
-## Node bootstrap 的交付條件
+## Node 基準與後續整合的交付條件
 
-結構整理 #8 先合併，任務 #2 的正式匯入再使用最新主線。第一次 Studio 匯入
-是一個獨立整合任務，先建立完整基準，#3／#4 等此基準合格後才開始：
+結構整理 #8 之後，任務 #2 已由 [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15)
+建立合格基準，後續核心、測試及功能任務從合併主線各自開工。基準與候選整合
+仍遵循以下交付條件：
 
-1. 固定外部來源快照，記錄版本、來源路徑和檔案差異；處理來源中未提交或
-   尚在另一聊天開發的內容，避免把半成品同步進 `main`。
+1. 固定 Git 來源 commit 與採用的依賴，記錄版本和檔案差異；一次性外部來源
+   留在基準紀錄，後續不再把共享資料夾變更直接同步進 `main`。
 2. 來源匯入 `addons/yugu_node_studio/`，測試放 `tests/yugu_node_studio/`；核對
    package ID、資產／授權及 fixture，保留 `addons/yugo/` 與 release 歷史。
 3. 讓 Node 測試明確載入該 Node package；跨套件 fixture／VRM Add-on 依賴
    必須可取得並記錄。失敗或缺 prerequisite 的測試不得列為通過。
-4. 新增 Node 專屬版本檢查、extension validate／build、安裝及功能測試。
+4. 執行 Node 專屬版本檢查、extension validate／build、安裝及功能測試。
    `addons/yugo/` 的版本與打包流程繼續可用。
 5. 決定多產品的版本／tag 路由，驗證 Studio tag 不會走 legacy `v*` workflow
    產生錯誤安裝包；發布由 integration 角色依授權執行。

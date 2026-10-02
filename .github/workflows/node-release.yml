@@ -1,0 +1,70 @@
+name: Publish Studio release
+
+on:
+  push:
+    tags: ["studio-v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: studio-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify tag, main ancestry and immutable release
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python -B scripts/node_check_version.py --tag "$RELEASE_TAG" --print-version)
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Existing releases are immutable; use a new version"
+            exit 1
+          fi
+          notes="docs/releases/STUDIO_${version//./_}.md"
+          test -s "$notes"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+      - uses: bradyajohnston/setup-blender@v5
+        with:
+          version: "5.1"
+      - name: Build exact committed Studio source
+        run: python -B scripts/node_build.py --require-clean --blender "$(command -v blender)"
+      - name: Qualify release ZIP and portable regressions
+        run: python -B scripts/node_run_checks.py --blender "$(command -v blender)" --package "dist/yugu_node_studio-${{ steps.metadata.outputs.version }}.zip" --output artifacts/studio-release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-release-validation
+          path: |
+            dist/yugu_node_studio-*.zip
+            dist/*.sha256
+            dist/studio-build.json
+            artifacts/studio-release/**/test.log
+            artifacts/studio-release/results.json
+      - name: Create versioned Studio release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_NOTES: ${{ steps.metadata.outputs.notes }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "dist/yugu_node_studio-$RELEASE_VERSION.zip" \
+            "dist/yugu_node_studio-$RELEASE_VERSION.zip.sha256" \
+            "dist/studio-build.json" \
+            --title "Yugu Node Studio $RELEASE_VERSION" \
+            --notes-file "$RELEASE_NOTES" \
+            --verify-tag

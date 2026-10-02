@@ -41,7 +41,7 @@ def main():
     generated = output / 'generated'
     generated.mkdir(exist_ok=True)
     records = []
-    tests = [('protocols', [sys.executable, '-B', str(TESTS / 'test_protocols.py')])]
+    tests = [(path.stem, [sys.executable, '-B', str(path)]) for path in sorted(TESTS.glob('test_*.py'))]
     tests += [(name, [str(binary), '--background', '--factory-startup', '--disable-autoexec',
                       '--python-exit-code', '1', '--python', str(TESTS / name)]) for name in selected]
     for name, command in tests:
@@ -60,7 +60,7 @@ def main():
             content = result.stdout + '\n' + result.stderr
             log.write_text(content, encoding='utf-8')
             passed = result.returncode == 0 and 'Traceback (most recent call last)' not in content
-            if name != 'protocols':
+            if name.endswith('.py'):
                 passed = passed and 'NODE_TEST_SOURCE_OK:' in content
             records.append({'test': name, 'status': 'passed' if passed else 'failed',
                             'returncode': result.returncode, 'command': command, 'log': str(log)})
