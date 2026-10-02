@@ -19,9 +19,14 @@ require a new approval for routine work already authorized by the user.
   repository-layout task #8. Runtime and assets live in `addons/yugu_node_studio/`;
   Node tests live in `tests/yugu_node_studio/`. Read the source and
   `docs/development/NODE_BASELINE.md` before relying on an interface. Do not
-  describe planned modules or adapters as implemented. Tasks #3 and #4 can use
-  this merged baseline; consumers of a new core interface still wait for its
-  qualified integration.
+  describe planned modules or adapters as implemented. Task #3's qualified
+  public feature API merged through PR #18; read
+  `docs/architecture/PUBLIC_API.md` before implementing a consumer. Task #16's
+  0.7.0 release candidate integrates Floating UI, Prop Physics, and native
+  Ragdoll Motion through this API. Ragdoll uses typed pose values and whole-rig
+  ownership; stop/release existing pose controllers before starting it.
+  Final candidate qualification and publication are recorded separately;
+  do not infer a published release from source integration.
 - Do not synchronize or overwrite live files in another checkout or the shared
   `motion_codedev/yugo*` folders. Git task workspaces are the development source
   of truth; the former source folders remain reference snapshots until an

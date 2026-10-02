@@ -9,11 +9,12 @@
 | 項目 | 目前狀態 | 後續規則 |
 | --- | --- | --- |
 | `addons/yugo/` | repository 現有舊產品；manifest ID 為 `yugo`，版本為 0.1.26 | 保留 package ID、既有發布與必要修正 |
-| `addons/yugu_node_studio/` | #2 已透過 PR #15 導入 qualified 0.6.0 基準，含 runtime、資產、建置及 CI | 新開發以 Git 工作區的 Studio 來源為準 |
+| `addons/yugu_node_studio/` | #2／PR #15 導入 qualified 0.6.0；#16 的 0.7.0 release candidate 接入 Floating UI、Prop Physics 與原生 Ragdoll Motion | 新開發以 Git 工作區的 Studio 來源為準；完整候選驗證與發布另行記錄 |
 | `yugu_node` | 外部已有另一份 Node 實作 | 當作比較／遷移來源；不建立第二條持續獨立演進的核心 |
 | 任務工作區與範圍檢查 | 本次治理工具提供 worktree 啟動及修改範圍檢查 | 每個實作聊天使用自己的工作區 |
-| 模組 registry／自動載入契約 | #3 核心介面工作進行中；以該 PR 的驗證及合併紀錄為準 | 消費端在介面 qualified 整合後接入 |
-| 中央資源鎖／lease service | 尚未實作 | 先由整合角色登記與排序；有需要再加後端 |
+| 模組 registry／自動載入契約 | #3 已透過 qualified PR #18 合併 | 消費端採 [PUBLIC_API.md](PUBLIC_API.md) 的註冊、資料與 lifecycle 契約 |
+| 執行期 object transform claims | #3 公開 API 提供原子 claim／release 與衝突拒絕 | 只涵蓋同一 Studio 執行期的物件 transform；功能自行定義還原行為 |
+| 跨聊天任務／共享資源 lease service | 尚未實作 | 仍由整合角色在 Issue／PR 登記與排序 |
 
 Studio 的來源版本、封裝比較及測試結果以 [Node 基準紀錄](../development/NODE_BASELINE.md)
 及各次整合 PR 為準。#2 已通過來源、ZIP 及 portable regressions；正式 release
@@ -22,8 +23,13 @@ Studio 的來源版本、封裝比較及測試結果以 [Node 基準紀錄](../d
 程式放 `addons/`，功能測試分在 `tests/yugo/` 與
 `tests/yugu_node_studio/`，工作區工具測試在 `tests/governance/`。外掛必需資產
 保留在各自套件；大測試素材與其交接依[素材指南](../development/TEST_MATERIALS.md)，
-不另建共用素材資料庫。任務 #3 在這個合併基準上落實功能子分類與公開介面；
-規劃中的子目錄仍須以實際來源與通過的驗證為依據。
+不另建共用素材資料庫。任務 #3 以
+[PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18) 完成功能子分類與
+公開介面；`modules/floating_ui/`、`modules/physics/` 與 `modules/ragdoll/` 已接入
+0.7.0 候選。Ragdoll 的 typed Pose Source → Ragdoll Motion → Apply Ragdoll 使用共用
+action、scheduler 與整個骨架的 pose lease；Enter／Recover 在實際 COMPLETED 後發出
+End。其他規劃中的子目錄仍須
+以實際來源與通過的驗證為依據。
 
 ## 程式責任要怎麼切
 
@@ -62,13 +68,14 @@ Studio 的來源版本、封裝比較及測試結果以 [Node 基準紀錄](../d
 - **Dependencies**：跨模組依賴由 Issue／PR 記錄，core 變更先進入整合，消費端
   再以合併後的基準開發或更新。相同檔案沒有 Git conflict 仍須驗證執行結果。
 
-未來若新增 registry，其第一個任務應定義 module ID、依賴、註冊／解除、
-node／socket 宣告及 lifecycle 行為，再選一個現有模組試接。不要先讓多個
-聊天各寫一套 registry 或宣稱所有模組已可隨插隨用。
+已合併的 registry 定義 module ID、依賴、註冊／解除、node／socket 宣告及
+lifecycle 行為。Floating UI、Prop Physics 與 Ragdoll Motion 使用同一套公開 API 接入；後續
+功能閱讀 [PUBLIC_API.md](PUBLIC_API.md)，不另寫第二套 registry，也不假設未遷移
+模組已自動符合新契約。
 
 ## 核心改動如何接入
 
-### 第一個公開擴充介面必須處理的項目
+### 已合併公開擴充介面的邊界
 
 - Value 是可讀取的當前資料；event 是一次觸發的 payload；action 的 End
   表示真正完成，並分別定義 Failed、Cancelled 與 timeout。不得以一次 tick
@@ -79,9 +86,12 @@ node／socket 宣告及 lifecycle 行為，再選一個現有模組試接。不�
   `_runs`、`_tasks`、`_Pulse` 等私有狀態。
 - 擴充宣告提供節點 classes、evaluator、action handler、menu/card 描述及
   register/unregister/cleanup；統一透過核心 registry 接入，避免每個功能修改
-  相同分派檔案。完整 registry 尚待任務 #3 實作。
-- 現行 target 仲裁主要涵蓋 bone rotation／shape key；object transform、camera、
-  physics、material 的控制權需擴充公開協議，不能假設現有核心已完整支援。
+  相同分派檔案。#3／PR #18 已提供上述 registry 與共用排程的接入點。
+- 原有 target 仲裁涵蓋 bone rotation／shape key；#3 另提供 object transform
+  的公開 claims，三個 adapter 已使用。Ragdoll 的整個 ARMATURE claim 也獨占全部 pose 的寫入控制權，
+  啟動前先停止並釋放既有 Apply／native pose／spring controller。成功捕捉後，它會
+  釋放由該 rig 所屬 physics anchor 持有的 props；無關 anchor 保持。Claims 不會保存或還原 transform；
+  camera／material 等其他寫入領域仍需各自定義公開協議，不能假設 claims 已涵蓋。
 
 共享 schema、node/socket、scheduler、lifecycle、registration、資料持久化及
 release 路由的改動由 `core` 或 `integration` 任務處理。PR 必須列出：

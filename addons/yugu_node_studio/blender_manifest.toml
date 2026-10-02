@@ -15,11 +15,14 @@ tags = ["Animation", "Rigging"]
 
 [permissions]
 network = "Receive VMC and iFacialMocap motion data"
+files = "Load local UI templates and avatar images"
 
 [build]
 paths_exclude_pattern = [
   "__pycache__/",
   "*.pyc",
+  "*.blend[1-9]",
+  "*.blend@*",
   ".git",
   "tests/",
 ]

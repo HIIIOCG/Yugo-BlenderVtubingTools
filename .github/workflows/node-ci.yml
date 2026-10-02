@@ -29,6 +29,8 @@ jobs:
         run: |
           version=$(python -B scripts/node_check_version.py --print-version)
           python -B scripts/node_run_checks.py --blender "$(command -v blender)" --package "dist/yugu_node_studio-$version.zip" --output artifacts/node-ci
+      - name: Validate standalone ragdoll lifecycle and source package
+        run: python -B tests/ragdoll/run_checks.py --blender "$(command -v blender)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -39,3 +41,5 @@ jobs:
             dist/studio-build.json
             artifacts/node-ci/**/test.log
             artifacts/node-ci/results.json
+            artifacts/checks-*/report.json
+            artifacts/checks-*/*.log

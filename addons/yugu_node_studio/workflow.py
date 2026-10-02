@@ -204,9 +204,11 @@ def active_in(tree):
     return any(run["tree"] == tree.name and run["state"] == "running" for run in _runs.values())
 
 
-def _busy(pulse, node):
+def _busy(pulse, node, inputs=None):
     from . import flow
-    pending = [task for task in _tasks.values() if task["tree"] == node.id_data.name and task["node"] == flow._uid(node)]
+    pending = [task for task in _tasks.values() if task["tree"] == node.id_data.name
+               and task["node"] == flow._uid(node)
+               and (inputs is None or task.get('input_name') in inputs)]
     policy = getattr(node, "busy_policy", "PARALLEL")
     if pending and policy == "IGNORE":
         node.last_summary = "Running · ignored Enter"
@@ -258,7 +260,7 @@ def receive(pulse, node, socket, path):
             return True
         if socket.name not in spec.inputs:
             return False
-        if _busy(pulse, node):
+        if (spec.policy_inputs is None or socket.name in spec.policy_inputs) and _busy(pulse, node, spec.policy_inputs):
             return True
         timeout = max(0.0, float(getattr(node, "timeout_seconds", 0.0)))
         task = _task(pulse, node, "extension", node_type=kind,

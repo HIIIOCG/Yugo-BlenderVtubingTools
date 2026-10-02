@@ -209,9 +209,14 @@ def _snapshot(session, status=None):
 
 def _restore(session):
     global _writing
-    obj = bpy.data.objects.get(session.object_name)
+    objects = getattr(bpy.data, "objects", None)
+    # Blender restricts scene access during extension disable. Retire the
+    # session without touching the last pose when restoration is unavailable.
+    if objects is None:
+        return
+    obj = objects.get(session.object_name)
     if obj is None or obj.as_pointer() != session.object_id:
-        obj = next((candidate for candidate in bpy.data.objects
+        obj = next((candidate for candidate in objects
                     if candidate.as_pointer() == session.object_id), None)
     if obj is None or obj.data is None or obj.data.as_pointer() != session.data_id:
         return

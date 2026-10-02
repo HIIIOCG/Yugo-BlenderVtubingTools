@@ -10,7 +10,7 @@
 4. 使用 scripts/start_task.py 建立獨立 worktree，或由統籌角色建立並記錄等效隔離環境。
 5. 核對 worktree 的絕對路徑與分支；所有工具明確使用該路徑。
 
-任務 #2 已在結構整理 #8 之後透過 [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15) 匯入 qualified Studio 0.6.0 基準。正式來源在 `addons/yugu_node_studio/`，測試在 `tests/yugu_node_studio/`；#3／#4 可從合併後的主線開工，依賴新核心介面的功能仍需等待該介面驗證整合。以 repository 的 worktree 為唯一可編輯來源，原 motion_codedev 來源是唯讀參考，不維持雙向人工同步。
+任務 #2 已在結構整理 #8 之後透過 [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15) 匯入 qualified Studio 0.6.0 基準；#3 的 qualified 公開介面已透過 [PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18) 合併，契約見 [PUBLIC_API.md](docs/architecture/PUBLIC_API.md)。#16 的 0.7.0 release candidate 已接入 Floating UI、Prop Physics 與原生 Ragdoll Motion adapter；完整候選驗證及發布狀態以整合紀錄為準。正式來源在 `addons/yugu_node_studio/`，測試在 `tests/yugu_node_studio/`。以 repository 的 worktree 為唯一可編輯來源，原 motion_codedev 來源是唯讀參考，不維持雙向人工同步。
 
 開發中保持已記錄的基準；採用新合併依賴時再 fetch，明確整合並更新基準，重跑受影響檢查。整合角色在驗證合併候選前自行取得最新主線。閒置對話與老闆的桌面資料夾不會因其他對話更新而自動同步。
 

@@ -43,7 +43,8 @@ Windows 啟動範例，請替換任務 ID 和描述：
 python -B scripts/start_task.py --task 123 --slug camera-targets --role feature --scope "addons/yugu_node_studio/modules/camera/**" --scope "tests/yugu_node_studio/blender_camera.py" --workspace-root D:\Projects\BCON26\motion_codedev\.workspaces\tasks
 ```
 
-這是功能模組介面完成整合後的示例；Studio 來源已導入，`modules/camera/`
+公開功能介面已由 #3／[PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18)
+完成 qualified 整合，契約見 [PUBLIC_API.md](../architecture/PUBLIC_API.md)。`modules/camera/`
 仍是示意範圍，不能當作該模組已存在的依據。實際 scope 一律複製最新 Issue，
 並讀取工作區的真實來源，不能用示例自行擴大範圍。
 
@@ -163,8 +164,12 @@ Blender user 路徑設成任務目錄，再啟動獨立程序；`--factory-start
 結構整理 #8 與來源導入 #2 已完成；[PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15)
 把 qualified Studio 0.6.0 基準導入 `addons/yugu_node_studio/`，測試放
 `tests/yugu_node_studio/`。來源、檔案比對、可重現入口及受限項目記錄在
-[NODE_BASELINE.md](NODE_BASELINE.md)。任務 #3／#4 可採用合併後的基準；
-依賴新的共用介面或功能 adapter 時，仍按各自的 PR 驗證與整合順序接入。
+[NODE_BASELINE.md](NODE_BASELINE.md)。#3 公開介面已透過
+[PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18) 合併；功能消費端採
+[PUBLIC_API.md](../architecture/PUBLIC_API.md) 的 module/action/evaluator 與 lifecycle 契約。
+#16 的 0.7.0 release candidate 已接入 Floating UI、Prop Physics 與原生 Ragdoll Motion；
+最終候選驗證及
+正式 release 尚按整合任務記錄處理。後續共用介面或 adapter 的變更仍依 PR 順序接入。
 
 後續修改、建置與測試以 Git 工作區為準。Studio 的入口為
 `scripts/node_check_version.py`、`scripts/node_build.py`、`scripts/node_run_checks.py`；

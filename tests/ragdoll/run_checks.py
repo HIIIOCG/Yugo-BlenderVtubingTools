@@ -112,6 +112,7 @@ def main():
         run_command([sys.executable, "-B", "-m", "unittest", "discover", "-s", TESTS, "-p", "test_*.py"], run_root, "solver")
         background_test(blender, TESTS / "blender_service.py", run_root, "service")
         background_test(blender, TESTS / "blender_preview.py", run_root, "preview")
+        background_test(blender, TESTS / "blender_restricted_lifecycle.py", run_root, "restricted-lifecycle")
         run_command([blender, "--background", "--factory-startup", "--disable-autoexec", "--command", "extension",
                      "build", "--source-dir", SOURCE, "--output-dir", run_root], run_root, "build")
         package = run_root / (manifest["id"] + "-" + manifest["version"] + ".zip")
