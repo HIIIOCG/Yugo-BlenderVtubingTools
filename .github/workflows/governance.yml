@@ -1,0 +1,74 @@
+name: Parallel development checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  governance:
+    name: Governance and workspace tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check management documents and package exclusions
+        run: python -B scripts/check_governance.py
+      - name: Test isolated workspace and scope guards
+        run: python -B -m unittest discover -s scripts/tests -p "test_*.py"
+
+  scope:
+    name: Canonical task scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          path: trusted-policy
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check canonical Issue and changed paths with base policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          policy="$GITHUB_WORKSPACE/trusted-policy"
+          if [ ! -f "$policy/scripts/check_pr_scope.py" ]; then
+            # Allow only the reviewed first governance task on its original base.
+            if [ "$PR_BASE_SHA" != "a2d15aa1572968268b7c3536a18868aa4b5219d6" ]; then
+              echo "::error::Trusted scope policy is missing from this base"
+              exit 1
+            fi
+            python -I - <<'PY'
+          import json, os, re
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as stream:
+              event = json.load(stream)
+          body = event['pull_request'].get('body') or ''
+          blocks = re.findall(r'^```task-scope[ \t]*\r?\n(.*?)^```[ \t]*$', body, re.M | re.S)
+          if len(blocks) != 1:
+              raise SystemExit('Bootstrap requires a single canonical task declaration')
+          scope = json.loads(blocks[0])
+          if type(scope.get('task_id')) is not int or scope['task_id'] != 1 or scope.get('role') != 'integration':
+              raise SystemExit('Only the reviewed governance task #1 may bootstrap policy')
+          PY
+            policy="$GITHUB_WORKSPACE/candidate"
+          fi
+          python -B "$policy/scripts/check_pr_scope.py" --policy-root "$policy"
