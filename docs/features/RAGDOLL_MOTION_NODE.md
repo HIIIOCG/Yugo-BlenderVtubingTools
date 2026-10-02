@@ -7,8 +7,10 @@ contact and a continuous stable interval before blending to the source pose.
 A new hit during recovery keeps the current pose and velocity and resumes physics.
 
 The source baseline is `193c33c83416d52cfc1b4184eee1feaa7b17d708`.
-Studio source import (#2) and public extension contracts (#3) are still prerequisites
-for the **formal Studio adapter**. This preview uses its own declared node tree and
+Studio source import (#2) merged through PR #15 during this task's development;
+public extension contracts (#3) remain the prerequisite for the **formal Studio
+adapter**. This independent feature retains its recorded source baseline until
+deliberate integration. This preview uses its own declared node tree and
 socket IDs and does not change Studio graphs or its workflow/scheduler internals.
 The public service owns no timer; its caller advances time.
 
