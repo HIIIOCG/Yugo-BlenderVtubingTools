@@ -1,5 +1,9 @@
 # Yugu Node Studio 0.7.0 release candidate
 
+Blender 5.1.2／5.2.0 LTS 的完整 portable suite、實際 ZIP 載入、真實 GUI 排程及
+Undo／Redo 已通過；來源、驗證證據與未執行項目見
+[0.7.0 qualification](STUDIO_0_7_0_QUALIFICATION.md)。正式 tag／Release 尚未發布。
+
 Studio 完整程式與資產改由 GitHub 管理。此候選將 Floating UI、realtime prop physics 與 #14 的原生 Ragdoll Motion，透過 #3／PR #18 的 [公開 API](../architecture/PUBLIC_API.md)，整合進既有 Studio node tree、menu、Action Flow 和共用 scheduler。完整候選驗證及正式發布尚待整合紀錄確認。
 
 ## 功能
