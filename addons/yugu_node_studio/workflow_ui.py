@@ -30,6 +30,16 @@ ADD_ITEMS = (
 )
 
 
+def add_items(_self=None, _context=None):
+    from . import extensions
+    return ADD_ITEMS + extensions.card_entries()
+
+
+def _step_type(node_id):
+    from . import extensions
+    return node_id in STEP_TYPES or extensions.card_spec(node_id) is not None
+
+
 class CardGraphError(ValueError):
     pass
 
@@ -161,7 +171,7 @@ class _Parser:
                 self.claim(node)
                 chain.terminator, chain.tail = target, outputs
                 return chain
-            if target.name != "Enter" or node.bl_idname not in STEP_TYPES:
+            if target.name != "Enter" or not _step_type(node.bl_idname):
                 raise CardGraphError(f'"{node.bl_label}" needs the graph editor')
             unit = self.unit(node)
             chain.cards.append(unit)
@@ -309,11 +319,16 @@ def new_definition(name="Action Flow"):
 
 
 def add_card(tree, chain, kind):
+    from . import extensions
+    feature_card = extensions.card_spec(kind)
     descriptions = {"WAIT": "Continue after this wait finishes.", "TEST": "Check timing and event payloads without a character.",
                     "PARALLEL": "Continue after all branches complete.", "REPEAT": "Finish the body before starting its next iteration.",
                     "IF": "Choose a branch using the Condition input.", "ACTION": "Run the selected Action Flow definition."}
     types = {"WAIT": WAIT, "TEST": TEST, "PARALLEL": PARALLEL, "REPEAT": REPEAT, "IF": IF, "ACTION": ACTION}
-    node = _new_node(tree, types[kind], dict((item[0], item[1]) for item in ADD_ITEMS)[kind], descriptions[kind])
+    if feature_card is not None:
+        node = _new_node(tree, kind, feature_card.label, feature_card.description)
+    else:
+        node = _new_node(tree, types[kind], dict((item[0], item[1]) for item in ADD_ITEMS)[kind], descriptions[kind])
     node.location = (chain.owner.location.x + 260 * (len(chain.cards) + 1), chain.owner.location.y)
     outlets = (node.outputs.get("End"),)
     owned = [node]
@@ -418,6 +433,10 @@ def _draw_chain(layout, tree, chain):
         for name in ("seconds", "count", "fail", "workflow_tree", "busy_policy"):
             if hasattr(node, name):
                 card.prop(node, name)
+        from . import extensions
+        feature_card = extensions.card_spec(node.bl_idname)
+        if feature_card is not None and callable(feature_card.draw):
+            feature_card.draw(card, node)
         if node.bl_idname == PARALLEL:
             card.label(text=f"Wait for all {node.branches} branches")
         if node.bl_idname == IF:
@@ -467,7 +486,7 @@ class YUGUS_OT_workflow_card_add(_CardOperator, bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
     owner_name: bpy.props.StringProperty(options={"HIDDEN"})
     output_name: bpy.props.StringProperty(options={"HIDDEN"})
-    kind: bpy.props.EnumProperty(name="Step", items=ADD_ITEMS, default="WAIT")
+    kind: bpy.props.EnumProperty(name="Step", items=add_items)
 
     def invoke(self, context, _event):
         return context.window_manager.invoke_props_dialog(self, width=360)
