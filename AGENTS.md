@@ -25,6 +25,12 @@ require a new approval for routine work already authorized by the user.
 
 - Each implementation chat owns one task ID, one branch, and one absolute
   workspace path. A separate branch in the same directory is not isolation.
+- Each active chat fetches its own remote and verifies the latest `origin/main`
+  before starting a task or adopting a newly merged dependency. Record and keep
+  the task's chosen baseline during development; update it deliberately and
+  re-run affected checks. `start_task.py` does not fetch. Do not require the
+  human to pull another checkout or use their GitHub Desktop folder as a shared
+  workspace. Idle chats do not synchronize until they resume work.
 - Use `scripts/start_task.py` for new tasks. Read the resulting `.dev/task.json`
   and check the actual workspace and branch before making changes. A task must
   state its role, allowed paths, baseline commit, dependencies, and resource
@@ -56,6 +62,10 @@ require a new approval for routine work already authorized by the user.
   shared resources in the task record; wait for their recorded owner to finish.
   Never install into or reload the user's active Blender session for a routine
   task test.
+- Follow [the test material guide](docs/development/TEST_MATERIALS.md): treat
+  received originals as read-only, test copies, and record the exact material
+  version with the tested commit. Do not automatically commit local/private
+  material or report cloud tests that lacked their required fixtures as passed.
 
 ## Hand off, integrate, and release
 
@@ -64,7 +74,7 @@ require a new approval for routine work already authorized by the user.
   reviewable PR; it does not itself change the shared runtime.
 - The integration role processes dependent/shared changes in order, resolves
   conflicts in its own workspace, and verifies the exact candidate against the
-  latest `main`. Re-run affected checks if that candidate changes.
+  latest fetched `main`. Re-run affected checks if that candidate changes.
 - Only the integration role performs authorized merges, assigns product
   versions, updates release metadata, creates release tags, or publishes
   packages. Task branches must not invent competing version bumps.
