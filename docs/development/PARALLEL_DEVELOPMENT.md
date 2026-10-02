@@ -31,7 +31,8 @@ GitHub Issue／PR 是團隊可讀的工作紀錄；`.dev/task.json` 是本機檢
    任務 ID 必須唯一，並且能對應回 Issue；文件中的示例 ID 並不代表已有任務。
 2. 整合角色確認沒有重複認領、確定起始基準及需要等待的核心工作。
    已獲授權的整合角色可自行建立任務，不必為例行拆分反覆要求使用者批准。
-3. 使用 `scripts/start_task.py` 建立新的 Git worktree、branch 和 `.dev/task.json`。
+3. 負責聊天自行 `git fetch origin` 並核對最新 `origin/main`，保留任何既有修改；
+   再使用 `scripts/start_task.py` 建立新的 Git worktree、branch 和 `.dev/task.json`。
    把新工作區路徑提供給負責聊天，後續所有編輯與測試都使用該路徑。
 4. 負責聊天閱讀根目錄 `AGENTS.md`、任務紀錄及相關模組說明，核對實際路徑、
    branch、`base_sha` 和 `allowed_paths`，才開始修改。
@@ -50,6 +51,11 @@ python -B scripts/start_task.py --task 123 --slug camera-targets --role feature 
 `branch`、`workspace`、`base_sha`、`allowed_paths`、`dependencies`、`resources`
 及 `status`。`protected_paths` 由範圍檢查工具的政策決定。`.dev/task.json` 是
 本機身分資料，不能代替 GitHub 上的依賴、範圍及整合紀錄。
+
+`start_task.py` 不會自動 fetch。開發中固定已記錄的基準；採用新合併依賴時，
+聊天再次 fetch、明確整合並更新基準，重跑受影響檢查。整合角色在測試候選前
+取得最新主線。這些操作由正在工作的聊天執行，沒有背景輪詢或閒置聊天自動
+同步；也不要求老闆反覆替開發工作按 Pull origin。
 
 ## 角色與修改範圍
 

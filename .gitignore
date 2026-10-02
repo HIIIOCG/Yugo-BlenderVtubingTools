@@ -26,6 +26,7 @@ venv/
 /workspaces/
 /artifacts/
 /blender-profile/
+/test_materials/
 
 # Operating system files
 .DS_Store

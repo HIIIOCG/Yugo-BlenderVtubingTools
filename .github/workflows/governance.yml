@@ -52,23 +52,7 @@ jobs:
         run: |
           policy="$GITHUB_WORKSPACE/trusted-policy"
           if [ ! -f "$policy/scripts/check_pr_scope.py" ]; then
-            # Allow only the reviewed first governance task on its original base.
-            if [ "$PR_BASE_SHA" != "a2d15aa1572968268b7c3536a18868aa4b5219d6" ]; then
-              echo "::error::Trusted scope policy is missing from this base"
-              exit 1
-            fi
-            python -I - <<'PY'
-          import json, os, re
-          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as stream:
-              event = json.load(stream)
-          body = event['pull_request'].get('body') or ''
-          blocks = re.findall(r'^```task-scope[ \t]*\r?\n(.*?)^```[ \t]*$', body, re.M | re.S)
-          if len(blocks) != 1:
-              raise SystemExit('Bootstrap requires a single canonical task declaration')
-          scope = json.loads(blocks[0])
-          if type(scope.get('task_id')) is not int or scope['task_id'] != 1 or scope.get('role') != 'integration':
-              raise SystemExit('Only the reviewed governance task #1 may bootstrap policy')
-          PY
-            policy="$GITHUB_WORKSPACE/candidate"
+            echo "::error::Trusted scope policy is missing from this base"
+            exit 1
           fi
           python -B "$policy/scripts/check_pr_scope.py" --policy-root "$policy"

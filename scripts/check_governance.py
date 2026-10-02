@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = (
     "AGENTS.md", "README.md", "CONTRIBUTING.md",
     "docs/development/PARALLEL_DEVELOPMENT.md",
-    "docs/development/NODE_BASELINE.md", "docs/development/TASK_BOARD.md",
+    "docs/development/NODE_BASELINE.md", "docs/development/TEST_MATERIALS.md",
     "docs/development/CHAT_STARTERS.md", "docs/architecture/NODE_SYSTEM.md",
     "docs/legacy/YUGO_0_1_26.md", ".github/ISSUE_TEMPLATE/development_task.yml",
     ".github/pull_request_template.md",
