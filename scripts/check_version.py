@@ -12,6 +12,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ADDON_ROOT = ROOT / "addons" / "yugo"
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -25,7 +26,7 @@ def fail(message: str) -> None:
 
 
 def read_bl_info() -> dict[str, object]:
-    module = ast.parse((ROOT / "__init__.py").read_text(encoding="utf-8"))
+    module = ast.parse((ADDON_ROOT / "__init__.py").read_text(encoding="utf-8"))
     for node in module.body:
         if not isinstance(node, ast.Assign):
             continue
@@ -49,7 +50,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    manifest_path = ROOT / "blender_manifest.toml"
+    manifest_path = ADDON_ROOT / "blender_manifest.toml"
     with manifest_path.open("rb") as manifest_file:
         manifest = tomllib.load(manifest_file)
 
@@ -89,18 +90,18 @@ def main() -> None:
             )
 
     for required in ("__init__.py", "blender_manifest.toml", "LICENSE", "README.md"):
-        if not (ROOT / required).is_file():
+        if not (ADDON_ROOT / required).is_file():
             fail(f"required file is missing: {required}")
 
-    for python_file in ROOT.rglob("*.py"):
+    for python_file in ADDON_ROOT.rglob("*.py"):
         try:
             ast.parse(python_file.read_text(encoding="utf-8"), filename=str(python_file))
         except (SyntaxError, UnicodeError) as error:
-            fail(f"could not parse {python_file.relative_to(ROOT)}: {error}")
+            fail(f"could not parse {python_file.relative_to(ADDON_ROOT)}: {error}")
 
     forbidden = [
-        path.relative_to(ROOT)
-        for path in ROOT.rglob("*")
+        path.relative_to(ADDON_ROOT)
+        for path in ADDON_ROOT.rglob("*")
         if path.name == "__pycache__" or path.suffix == ".pyc"
     ]
     if forbidden:

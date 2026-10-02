@@ -1,13 +1,16 @@
 """Validate that a removed Motion Layer is never written through stale RNA."""
 
 import sys
+from pathlib import Path
 
 import bpy
 
 
-WORKSPACE = r"D:\Projects\BCON26\motion_codedev"
-if WORKSPACE not in sys.path:
-    sys.path.insert(0, WORKSPACE)
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import load_yugo
+
+load_yugo()
 
 import yugo
 from yugo.state import ensure_runtime_id

@@ -19,7 +19,11 @@ from typing import Iterable
 EXPECTED_REPOSITORY = "HIIIOCG/Yugo-BlenderVtubingTools"
 ROLES = ("docs", "feature", "core", "integration")
 TASK_RECORD = ".dev/task.json"
-NODE_ROOT = "yugu_node_studio"
+NODE_ROOT = "addons/yugu_node_studio"
+# Older task baselines still use the former root-level product layout. Keep
+# its role boundaries when checking deletions and moves across that boundary.
+NODE_ROOTS = (NODE_ROOT, "yugu_node_studio")
+LEGACY_ROOT = "addons/yugo"
 NODE_SHARED_FILES = frozenset(
     f"{name}.py"
     for name in (
@@ -156,26 +160,57 @@ def validate_filesystem_path(repo: Path, relative: str) -> None:
         raise ScopeError(f"Changed path resolves outside the assigned workspace: {relative}.")
 
 
+def product_relative_path(path: str, roots: Iterable[str]) -> str | None:
+    """Return a path inside a product root, matching complete '/' segments."""
+    for root in roots:
+        if path == root:
+            return ""
+        if path.startswith(root + "/"):
+            return path[len(root) + 1:]
+    return None
+
+
+def product_documentation(path: str) -> bool:
+    return (
+        path.split("/")[-1] in ("readme.md", "contributing.md", "security.md")
+        or path.startswith("docs/")
+    )
+
+
 def required_role(path: str) -> str | None:
     lowered = path.casefold()
     parts = lowered.split("/")
+    node_path = product_relative_path(lowered, NODE_ROOTS)
+    legacy_path = product_relative_path(lowered, (LEGACY_ROOT,))
     if (
         parts[-1] == "agents.md"
         or parts[0] == "scripts"
+        or lowered.startswith("tests/governance/")
         or lowered.startswith(".github/workflows/")
         or lowered in ("blender_manifest.toml", "changelog.md")
-        or lowered in (f"{NODE_ROOT}/blender_manifest.toml", f"{NODE_ROOT}/changelog.md")
+        or node_path in ("blender_manifest.toml", "changelog.md")
+        or legacy_path in ("blender_manifest.toml", "changelog.md")
     ):
         return "integration"
     if (
+        # The former root-level legacy layout remains protected for old bases.
         (len(parts) == 1 and lowered.endswith(".py"))
         or parts[0] in LEGACY_PACKAGES
         or parts[0] == "core"
-        or (len(parts) > 1 and parts[0] == NODE_ROOT and parts[1] == "core")
+        # Legacy source and assets stay centrally owned. Allow its ordinary
+        # package documentation, while retaining runtime protection for Python
+        # files even if they are placed under a documentation directory.
         or (
-            len(parts) == 2
-            and parts[0] == NODE_ROOT
-            and parts[1] in NODE_SHARED_FILES
+            legacy_path is not None
+            and (legacy_path.endswith(".py") or not product_documentation(legacy_path))
+        )
+        or (
+            node_path is not None
+            and (
+                node_path == "core"
+                or node_path.startswith("core/")
+                or node_path in NODE_SHARED_FILES
+            )
         )
     ):
         return "core"
@@ -185,10 +220,14 @@ def required_role(path: str) -> str | None:
 def is_documentation(path: str) -> bool:
     lowered = path.casefold()
     parts = lowered.split("/")
+    product_paths = (
+        product_relative_path(lowered, NODE_ROOTS),
+        product_relative_path(lowered, (LEGACY_ROOT,)),
+    )
     return (
         parts[-1] in ("readme.md", "contributing.md", "security.md")
         or lowered.startswith(("docs/", "templates/", ".github/issue_template/"))
-        or (len(parts) > 1 and parts[0] == NODE_ROOT and parts[1] == "docs")
+        or any(item is not None and product_documentation(item) for item in product_paths)
         or lowered == ".github/pull_request_template.md"
         or lowered.startswith(".github/pull_request_template/")
     )

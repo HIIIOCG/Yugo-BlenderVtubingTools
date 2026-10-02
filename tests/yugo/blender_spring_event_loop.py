@@ -1,18 +1,21 @@
 """Verify Spring write-back is evaluated by Blender's normal UI event loop."""
 
 import sys
+from pathlib import Path
 import traceback
 
 import bpy
 
 
-WORKSPACE = r"D:\Projects\BCON26\motion_codedev"
-if WORKSPACE not in sys.path:
-    sys.path.insert(0, WORKSPACE)
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import load_yugo
+
+load_yugo()
 
 import yugo
 from yugo.springbone import runtime
-from yugo.tests.blender_spring_post_mix import (
+from blender_spring_post_mix import (
     add_avatar_layer,
     make_armature,
     make_extension,

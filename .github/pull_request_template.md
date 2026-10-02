@@ -9,7 +9,7 @@ task_id is the Issue number. Roles: docs, feature, core, integration.
 List the narrowest required repository-relative paths.
 
 ```task-scope
-{"task_id": 0, "role": "feature", "allowed_paths": ["yugu_node_studio/modules/example/**"]}
+{"task_id": 0, "role": "feature", "allowed_paths": ["addons/yugu_node_studio/modules/example/**"]}
 ```
 
 Task: #0

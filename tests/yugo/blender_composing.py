@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import bpy
 
 
-ADDON_PARENT = Path(__file__).resolve().parents[2]
-if str(ADDON_PARENT) not in sys.path:
-    sys.path.insert(0, str(ADDON_PARENT))
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import load_yugo
+
+load_yugo()
 
 import yugo  # noqa: E402
 

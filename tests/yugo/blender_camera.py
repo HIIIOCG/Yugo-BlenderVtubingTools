@@ -11,9 +11,11 @@ import bpy
 from mathutils import Vector
 
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import load_yugo
+
+load_yugo()
 
 import yugo
 from yugo import camera as cam_manager, scheduler

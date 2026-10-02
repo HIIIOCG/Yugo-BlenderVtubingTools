@@ -8,7 +8,8 @@
 - 本機來源：D:/Projects/BCON26/motion_codedev/yugu_node_studio。
 - 新產品 addon ID：yugu_node_studio；候選版本：0.6.0。
 - yugu_node（0.8.0）是另一個獨立 extension，並非 Studio 的 runtime 依賴。不要同步回補兩套 Node 核心。
-- repository 根目錄目前是舊 Yugo 0.1.26，不是 Studio 的程式根目錄。
+- 舊 Yugo 0.1.26 在 `addons/yugo/`；`addons/yugu_node_studio/` 目前僅有說明，尚未匯入 Studio 程式。
+- 正式匯入須等結構整理 #8 合併，再由任務 #2 使用最新主線；來源放 `addons/yugu_node_studio/`，測試放 `tests/yugu_node_studio/`。
 - 已逐一比較候選 ZIP 的 35 個打包檔案與本機來源，盤點時完全一致。未提交生成 ZIP 或 .blend 範例。
 
 候選安裝包 SHA-256：
@@ -52,6 +53,6 @@ a3535ed30285902d6ade776050e36ca1044c21e01aa50aab45a56f07a65b112a
 
 ## 完成導入的條件
 
-來源／資產／測試已納入 yugu_node_studio/；必要測試可在乾淨 clone 重現；Node 與 legacy 分開打包；既有 node/socket ID 與場景相容性保留；未完成項目有 Issue。由整合角色記錄結果後把本文件狀態改成 qualified。
+來源／資產已納入 `addons/yugu_node_studio/`，測試在 `tests/yugu_node_studio/`；必要測試可在乾淨 clone 重現；Node 與 legacy 分開打包；既有 node/socket ID 與場景相容性保留；未完成項目有 Issue。由整合角色記錄結果後把本文件狀態改成 qualified。小型受控 fixture 可放 `tests/yugu_node_studio/fixtures/`，該目錄目前尚未建立。
 
 來源導入、測試合格與正式 Release 是分開的里程碑；本次管理空間整理不建立 Node Release。

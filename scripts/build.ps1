@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$AddonRoot = Join-Path $RepositoryRoot 'addons\yugo'
 
 if (-not $BlenderPath) {
     $Command = Get-Command blender -ErrorAction SilentlyContinue
@@ -46,23 +47,26 @@ if (-not $PythonPath -or -not (Test-Path -LiteralPath $PythonPath)) {
     throw "Python was not found. Pass -PythonPath or install Python on PATH."
 }
 
-$OutputPath = Join-Path $RepositoryRoot $OutputDirectory
+$OutputPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory
+} else {
+    Join-Path $RepositoryRoot $OutputDirectory
+}
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 
 Push-Location $RepositoryRoot
 try {
-    & $PythonPath scripts/check_version.py
+    $ProductVersion = & $PythonPath scripts/check_version.py --print-version
     if ($LASTEXITCODE -ne 0) { throw "Release metadata validation failed." }
-    & $BlenderPath --command extension validate
+    & $BlenderPath --command extension validate $AddonRoot
     if ($LASTEXITCODE -ne 0) { throw "Blender source validation failed." }
 
-    & $BlenderPath --command extension build --source-dir $RepositoryRoot --output-dir $OutputPath
+    & $BlenderPath --command extension build --source-dir $AddonRoot --output-dir $OutputPath
     if ($LASTEXITCODE -ne 0) { throw "Blender extension build failed." }
 
-    $Package = Get-ChildItem -LiteralPath $OutputPath -Filter "yugo-*.zip" |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if (-not $Package) { throw "Blender did not create a Yugo package." }
+    $PackagePath = Join-Path $OutputPath "yugo-$ProductVersion.zip"
+    if (-not (Test-Path -LiteralPath $PackagePath)) { throw "Blender did not create the expected Yugo package." }
+    $Package = Get-Item -LiteralPath $PackagePath
     if ($Package.Length -ge 50MB) {
         throw "The extension package is unexpectedly larger than 50 MB."
     }
