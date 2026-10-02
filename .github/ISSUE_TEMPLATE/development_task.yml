@@ -21,7 +21,7 @@ body:
     attributes:
       label: 允許修改路徑
       description: 每行一個 repository 相對路徑／範圍，由統籌確認後補上 task-scope JSON
-      placeholder: "yugu_node_studio/modules/example/**"
+      placeholder: "addons/yugu_node_studio/modules/example/**"
     validations:
       required: true
   - type: textarea

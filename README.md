@@ -2,15 +2,24 @@
 
 這裡管理程式、開發任務與交付。每個開發對話使用自己的工作副本，成果檢查後統一合併。
 
-## 目前狀態
+## 檔案分類
 
-| 項目 | 狀態 |
-| --- | --- |
-| 多對話開發規範與隔離工具 | 已建立，[共同規則](AGENTS.md)適用後續開發 |
-| Yugu Node Studio 0.6.0 | 本機交付完成；[來源導入與測試整理](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues/2)尚待完成 |
-| 舊 Yugo 0.1.26 | 根目錄仍是已發布的舊版，保留建置與相容性 |
+```text
+addons/
+  yugo/                 舊版 0.1.26 程式、資產與安裝說明
+  yugu_node_studio/      新主線入口，目前只有說明，尚未匯入程式
+tests/
+  yugo/                 舊版功能測試
+  governance/           工作副本與規範工具測試
+docs/                   開工、素材、基準與架構說明
+scripts/                建置、版本與開發工具
+.github/                任務範本與自動檢查
+```
 
-新功能以 Node Studio 為方向；先完成來源導入，再進行核心與功能開發。
+新功能以 [Node Studio](addons/yugu_node_studio/README.md) 為方向；
+[結構整理 #8](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues/8)合併後，
+先完成[來源導入 #2](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues/2)，
+再並行進行核心與測試。Node 測試目錄將在導入時建立；目前沒有可安裝的 Node 套件。
 
 ## 從這裡開始
 
@@ -25,4 +34,4 @@
 
 開發者先讀 [AGENTS.md](AGENTS.md) 與 [開工及驗證流程](CONTRIBUTING.md)。架構與遷移見 [Node 系統邊界](docs/architecture/NODE_SYSTEM.md)，導入證據見 [Node 基準盤點](docs/development/NODE_BASELINE.md)。
 
-舊版的 [功能與安裝說明](docs/legacy/YUGO_0_1_26.md)及 [0.1.26 下載](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.1.26)繼續保留。本專案採 [GPL-3.0-or-later](LICENSE)。
+舊版的 [功能與安裝說明](addons/yugo/README.md)及 [0.1.26 下載](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.1.26)繼續保留。本專案採 [GPL-3.0-or-later](LICENSE)。

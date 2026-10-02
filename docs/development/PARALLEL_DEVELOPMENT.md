@@ -40,8 +40,11 @@ GitHub Issue／PR 是團隊可讀的工作紀錄；`.dev/task.json` 是本機檢
 Windows 啟動範例，請替換任務 ID 和描述：
 
 ```powershell
-python -B scripts/start_task.py --task 123 --slug camera-targets --role feature --scope "yugu_node_studio/modules/camera/**" --scope "yugu_node_studio/tests/blender_camera.py" --workspace-root D:\Projects\BCON26\motion_codedev\.workspaces\tasks
+python -B scripts/start_task.py --task 123 --slug camera-targets --role feature --scope "addons/yugu_node_studio/modules/camera/**" --scope "tests/yugu_node_studio/blender_camera.py" --workspace-root D:\Projects\BCON26\motion_codedev\.workspaces\tasks
 ```
+
+這是任務 #3 建立功能模組介面後的示例；目前 Node 程式與上述模組尚未匯入。
+實際 scope 一律複製最新 Issue，不能用示例自行擴大範圍。
 
 `--workspace-root` 是放置新工作區的絕對父目錄，必須在執行工具的 repository
 之外。不要把新工作區放進該 repository 的原始碼或打包內容中。範例父目錄
@@ -152,11 +155,13 @@ Blender user 路徑設成任務目錄，再啟動獨立程序；`--factory-start
 只有整合角色可更新 release metadata、建立正式 tag 及執行已獲授權的發布。
 已發布 tag／asset 保留；需要修正時發布新版本。
 
-目前 `v*` tag 對應 root legacy `yugo` 的 release workflow。Node source 尚未
+目前 `v*` tag 對應 `addons/yugo/` 的 legacy release workflow。Node source 尚未
 匯入；在 Node bootstrap 任務確立 package ID、來源位置、多產品版本／tag
 路由及安裝包驗證前，不把 Node tag 交給這個 legacy workflow。
 
-第一次 Node 匯入必須先記錄來源版本及檔案差異，補足測試與跨套件 fixture
-需求，再由獨立 PR 完成。現存 `motion_codedev` 開發資料夾在過渡期間是唯讀
+結構整理 #8 先合併，任務 #2 再從最新主線把 Node 來源匯入
+`addons/yugu_node_studio/`，測試放 `tests/yugu_node_studio/`。第一次匯入必須
+先記錄來源版本及檔案差異，補足測試與跨套件 fixture 需求，再由獨立 PR 完成。
+任務 #3／#4 仍等待 #2 的合格基準。現存 `motion_codedev` 開發資料夾在過渡期間是唯讀
 參考，不做雙向自動同步；匯入後新任務以 Git 工作區為準。舊 Yugo 的程式、
 package ID、版本及發行檔保留，不用直接覆寫舊 extension 的方式遷移。

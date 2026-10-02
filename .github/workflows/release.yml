@@ -33,8 +33,8 @@ jobs:
       - name: Build and validate extension
         run: |
           mkdir -p dist
-          blender --command extension validate
-          blender --command extension build --output-dir dist
+          blender --command extension validate addons/yugo
+          blender --command extension build --source-dir addons/yugo --output-dir dist
           package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
           if [ "$(stat -c%s "$package")" -ge 52428800 ]; then
             echo "::error::Extension package is unexpectedly larger than 50 MiB"

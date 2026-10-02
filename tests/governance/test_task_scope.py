@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 
-SCRIPTS = Path(__file__).resolve().parents[1]
+SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from task_scope import (  # noqa: E402
@@ -56,6 +56,15 @@ class GitTaskTests(unittest.TestCase):
         self.write(self.repo, "yugu_node_studio/runtime.py", "# Shared Node runtime\n")
         self.write(self.repo, "yugu_node_studio/nodes.py", "# Shared Node registry\n")
         self.write(self.repo, "yugu_node_studio/features/sway/runtime.py", "# Feature runtime\n")
+        self.write(self.repo, "addons/yugo/__init__.py", "# Relocated legacy registration\n")
+        self.write(self.repo, "addons/yugo/composing/runtime.py", "# Relocated legacy runtime\n")
+        self.write(self.repo, "addons/yugo/blender_manifest.toml", 'id = "yugo"\n')
+        self.write(self.repo, "addons/yugo/CHANGELOG.md", "Legacy release notes\n")
+        self.write(self.repo, "addons/yugu_node_studio/runtime.py", "# Relocated Node runtime\n")
+        self.write(self.repo, "addons/yugu_node_studio/nodes.py", "# Relocated Node registry\n")
+        self.write(self.repo, "addons/yugu_node_studio/blender_manifest.toml", 'id = "yugu_node_studio"\n')
+        self.write(self.repo, "addons/yugu_node_studio/CHANGELOG.md", "Node release notes\n")
+        self.write(self.repo, "addons/yugu_node_studio/modules/sway/runtime.py", "# Product feature runtime\n")
         git(self.repo, "add", ".")
         self.commit(self.repo, "Initial fixture")
         git(self.repo, "remote", "add", "origin", f"https://github.com/{EXPECTED_REPOSITORY}.git")
@@ -258,6 +267,146 @@ class GitTaskTests(unittest.TestCase):
         self.write(worker, "yugu_node_studio/runtime.py", "# Shared runtime edit\n")
         result = self.checker(worker)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_relocated_product_runtime_remains_protected_from_feature(self):
+        worker, _ = self.new_task(role="feature", scopes=["addons/**"])
+        protected = (
+            "addons/yugo/__init__.py",
+            "addons/yugo/composing/runtime.py",
+            "addons/yugo/modules/new_feature/runtime.py",
+            "addons/yugu_node_studio/data.py",
+            "addons/yugu_node_studio/constants.py",
+            "addons/yugu_node_studio/nodes.py",
+            "addons/yugu_node_studio/runtime.py",
+            "addons/yugu_node_studio/flow.py",
+            "addons/yugu_node_studio/workflow.py",
+            "addons/yugu_node_studio/scheduler.py",
+            "addons/yugu_node_studio/__init__.py",
+            "addons/yugu_node_studio/targets.py",
+            "addons/yugu_node_studio/input_nodes.py",
+            "addons/yugu_node_studio/workflow_nodes.py",
+            "addons/yugu_node_studio/flow_nodes.py",
+            "addons/yugu_node_studio/core/deep/registry.py",
+        )
+        for path in protected:
+            self.write(worker, path, "# Shared implementation change\n")
+        result = self.assertRejected(worker, "require core or integration")
+        for path in protected:
+            with self.subTest(path=path):
+                self.assertIn(f"{path}: shared Node or legacy runtime files require core or integration", result.stderr)
+
+    def test_both_addon_release_metadata_require_integration(self):
+        protected = (
+            "addons/yugo/blender_manifest.toml", "addons/yugo/CHANGELOG.md",
+            "addons/yugu_node_studio/blender_manifest.toml", "addons/yugu_node_studio/CHANGELOG.md",
+        )
+        for role in ("feature", "core", "docs"):
+            with self.subTest(role=role):
+                worker, _ = self.new_task(role=role, scopes=["addons/**"])
+                for path in protected:
+                    self.write(worker, path, "Release metadata edit\n")
+                result = self.assertRejected(worker, "require the integration role")
+                for path in protected:
+                    self.assertIn(f"{path}: governance or release files require the integration role", result.stderr)
+        worker, _ = self.new_task(role="integration", scopes=list(protected))
+        for path in protected:
+            self.write(worker, path, "Authorized release metadata edit\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["changed_paths"], sorted(protected))
+
+    def test_relocated_governance_tests_keep_integration_protection(self):
+        worker, _ = self.new_task(role="feature", scopes=["tests/**"])
+        self.write(worker, "tests/governance/test_new_policy.py", "# Gate change\n")
+        self.assertRejected(worker, "require the integration role")
+
+    def test_core_can_edit_relocated_shared_and_legacy_runtime(self):
+        worker, _ = self.new_task(role="core", scopes=[
+            "addons/yugo/**", "addons/yugu_node_studio/runtime.py", "addons/yugu_node_studio/core/**",
+        ])
+        for path in (
+            "addons/yugo/__init__.py", "addons/yugo/composing/runtime.py",
+            "addons/yugu_node_studio/runtime.py", "addons/yugu_node_studio/core/lifecycle.py",
+        ):
+            self.write(worker, path, "# Authorized shared implementation\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_feature_can_edit_relocated_module_private_runtime_and_init(self):
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugu_node_studio/modules/sway/**"])
+        for path in (
+            "addons/yugu_node_studio/modules/sway/runtime.py",
+            "addons/yugu_node_studio/modules/sway/__init__.py",
+            "addons/yugu_node_studio/modules/sway/nodes.py",
+            "addons/yugu_node_studio/modules/sway/core/helpers.py",
+        ):
+            self.write(worker, path, "# Bounded feature implementation\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_docs_can_edit_declared_readme_and_docs_in_both_addons(self):
+        worker, _ = self.new_task(role="docs", scopes=[
+            "addons/yugo/README.md", "addons/yugo/docs/**",
+            "addons/yugu_node_studio/README.md", "addons/yugu_node_studio/docs/**",
+        ])
+        for path in (
+            "addons/yugo/README.md", "addons/yugo/docs/guide.md",
+            "addons/yugu_node_studio/README.md", "addons/yugu_node_studio/docs/guide.md",
+        ):
+            self.write(worker, path, "Product documentation\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_product_boundary_does_not_capture_similarly_named_roots(self):
+        worker, _ = self.new_task(role="feature", scopes=[
+            "addons/yugo_examples/**", "addons/yugu_node_studio_examples/**",
+        ])
+        self.write(worker, "addons/yugo_examples/runtime.py", "# Separate example\n")
+        self.write(worker, "addons/yugu_node_studio_examples/runtime.py", "# Separate example\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_relocated_shared_deletion_is_protected_but_module_deletion_is_allowed(self):
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugu_node_studio/**"])
+        git(worker, "rm", "addons/yugu_node_studio/runtime.py")
+        self.assertRejected(worker, "require core or integration")
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugu_node_studio/modules/sway/**"])
+        git(worker, "rm", "addons/yugu_node_studio/modules/sway/runtime.py")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["changed_paths"], ["addons/yugu_node_studio/modules/sway/runtime.py"])
+
+    def test_relocated_legacy_and_metadata_deletion_remain_protected(self):
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugo/**"])
+        git(worker, "rm", "addons/yugo/composing/runtime.py")
+        self.assertRejected(worker, "require core or integration")
+        worker, _ = self.new_task(role="core", scopes=["addons/yugo/**"])
+        git(worker, "rm", "addons/yugo/blender_manifest.toml")
+        self.assertRejected(worker, "require the integration role")
+
+    def test_relocated_rename_cannot_move_shared_code_across_feature_boundary(self):
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugu_node_studio/**"])
+        git(worker, "mv", "addons/yugu_node_studio/runtime.py", "addons/yugu_node_studio/modules/sway/shared_copy.py")
+        result = self.assertRejected(worker, "require core or integration")
+        self.assertIn("addons/yugu_node_studio/runtime.py:", result.stderr)
+        worker, _ = self.new_task(role="feature", scopes=["addons/yugu_node_studio/**"])
+        git(worker, "mv", "addons/yugu_node_studio/modules/sway/runtime.py", "addons/yugu_node_studio/targets.py")
+        result = self.assertRejected(worker, "require core or integration")
+        self.assertIn("addons/yugu_node_studio/targets.py:", result.stderr)
+
+    def test_old_to_new_rename_requires_both_scopes_and_preserves_old_role(self):
+        destination = "addons/yugo/old_registration.py"
+        worker, _ = self.new_task(role="feature", scopes=["__init__.py", destination])
+        git(worker, "mv", "__init__.py", destination)
+        self.assertRejected(worker, "require core or integration")
+        worker, _ = self.new_task(role="integration", scopes=[destination])
+        git(worker, "mv", "__init__.py", destination)
+        self.assertRejected(worker, "__init__.py: outside the task's declared allowed_paths")
+        worker, _ = self.new_task(role="integration", scopes=["__init__.py", destination])
+        git(worker, "mv", "__init__.py", destination)
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["changed_paths"], ["__init__.py", destination])
 
     def test_rename_checks_old_and_new_paths(self):
         worker, _ = self.new_task(scopes=["docs/new.md"])

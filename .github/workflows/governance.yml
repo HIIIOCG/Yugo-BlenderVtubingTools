@@ -24,7 +24,7 @@ jobs:
       - name: Check management documents and package exclusions
         run: python -B scripts/check_governance.py
       - name: Test isolated workspace and scope guards
-        run: python -B -m unittest discover -s scripts/tests -p "test_*.py"
+        run: python -B -m unittest discover -s tests/governance -p "test_*.py"
 
   scope:
     name: Canonical task scope

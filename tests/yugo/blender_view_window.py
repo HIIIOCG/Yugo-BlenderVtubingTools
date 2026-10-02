@@ -2,14 +2,17 @@
 
 import math
 import sys
+from pathlib import Path
 import traceback
 
 import bpy
 
 
-WORKSPACE = r"D:\Projects\BCON26\motion_codedev"
-if WORKSPACE not in sys.path:
-    sys.path.insert(0, WORKSPACE)
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import load_yugo
+
+load_yugo()
 
 import yugo
 from yugo import view_window
@@ -171,7 +174,7 @@ def verify_follow_state():
 
         with bpy.context.temp_override(window=NEW_WINDOW):
             bpy.ops.screen.screenshot(
-                filepath=r"D:\Projects\BCON26\motion_codedev\tools\yugo_view_window_test.png",
+                filepath=str(Path.cwd() / "yugo_view_window_test.png"),
             )
         print("YUGO_VIEW_WINDOW_OK")
 

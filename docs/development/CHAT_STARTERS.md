@@ -9,12 +9,12 @@
 讀取 `AGENTS.md` 與自己的 Issue，再建立獨立 branch／worktree；不得覆蓋既有工作。
 開發中保留登記的基準，採用新依賴或交付整合時再更新並驗證。
 
-## 先做：#2 Node 基準整合
+## 結構 #8 合併後，先做：#2 Node 基準整合
 
 建議交給既有「整理 Yugo 0.1.14 GitHub 專案」聊天，或新開「Node 基準整合」。
 使用 Git repository 專案 `D:/Github/Yugo-BlenderVtubingTools`，請貼上：
 
-> 你負責 HIIIOCG/Yugo-BlenderVtubingTools 的任務 #2，角色為 integration。自行 fetch 最新主線，讀 AGENTS.md、最新 Issue #2 與 docs/development/NODE_BASELINE.md；依 Issue scope 建立獨立 worktree 並記錄基準。確認原 Node 聊天已停止變動後，唯讀匯入 Studio 0.6.0，保留 package／node／socket 身分，處理已知測試與跨舊安裝包依賴，完成獨立建置、驗證、PR 與最新主線整合。不得修改原來源或發布 tag。你可處理已授權範圍內的例行技術決策。
+> 你負責 HIIIOCG/Yugo-BlenderVtubingTools 的任務 #2，角色為 integration。確認結構整理 #8 已合併，自行 fetch 最新主線，讀 AGENTS.md、最新 Issue #2 與 docs/development/NODE_BASELINE.md；依最新 scope 建立獨立 worktree 並記錄基準。確認原 Node 聊天已停止變動後，唯讀匯入 Studio 0.6.0 到 addons/yugu_node_studio/，測試放 tests/yugu_node_studio/；保留 package／node／socket 身分，處理已知測試依賴，完成獨立建置、驗證、PR 與最新主線整合。不得修改原來源或發布 tag。
 
 ## #2 完成後，可同時做：#3 核心與 #4 測試
 
@@ -26,7 +26,7 @@
 
 **Node 測試聊天：**
 
-> 你負責 HIIIOCG/Yugo-BlenderVtubingTools 的任務 #4，角色為 feature。自行 fetch，讀最新 AGENTS.md、Issue #4 與 docs/development/TEST_MATERIALS.md；確認 #2 合格後，按最新 Issue scope 建立獨立 worktree、Blender profile、場景複本及輸出目錄。驗證 lifecycle、保存重開、value／event／action、取消／失敗與並行，記錄實際通過及受限項目；需要核心或 CI 修改時列出依賴，最後交聚焦 PR。
+> 你負責 HIIIOCG/Yugo-BlenderVtubingTools 的任務 #4，角色為 feature。自行 fetch，讀最新 AGENTS.md、Issue #4 與 docs/development/TEST_MATERIALS.md；確認 #2 合格後，按最新 Issue scope 在自己的 worktree 維護 tests/yugu_node_studio/，使用獨立 Blender profile、場景複本與輸出。驗證 lifecycle、保存重開、value／event／action、取消／失敗與並行，記錄實際通過及受限項目；需要核心或 CI 修改時列出依賴，最後交聚焦 PR。
 
 #4 可先驗證既有行為；涉及 #3 新介面的測試，等介面確認後再更新。
 後續新功能等公開介面確定，再由整合角色建立各自的 Issue。

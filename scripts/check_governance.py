@@ -19,6 +19,11 @@ REQUIRED = (
     "scripts/start_task.py", "scripts/check_task_scope.py", "scripts/task_scope.py",
     "scripts/check_pr_scope.py", "scripts/check_governance.py",
     ".github/workflows/governance.yml",
+    "addons/yugo/__init__.py", "addons/yugo/blender_manifest.toml",
+    "addons/yugo/preset.blend", "addons/yugo/README.md", "addons/yugo/LICENSE",
+    "addons/yugo/CHANGELOG.md", "addons/yugu_node_studio/README.md",
+    "tests/governance/test_task_scope.py", "tests/governance/test_pr_scope.py",
+    "tests/yugo/_bootstrap.py", "scripts/run_blender_tests.py",
 )
 
 
@@ -30,6 +35,8 @@ def main() -> int:
     for name in REQUIRED:
         path = ROOT / name
         if not path.is_file():
+            continue
+        if path.suffix == ".blend":
             continue
         content = path.read_text(encoding="utf-8")
         if not content.endswith("\n"):
@@ -46,7 +53,14 @@ def main() -> int:
             resolved = (path.parent / target).resolve()
             if not resolved.is_relative_to(ROOT) or not resolved.exists():
                 errors.append(f"Broken local link in {name}: {target}")
-    with (ROOT / "blender_manifest.toml").open("rb") as stream:
+    for path in ROOT.glob("*.py"):
+        errors.append(f"Addon Python must live under addons/, not repository root: {path.name}")
+    for name in ("blender_manifest.toml", "preset.blend", "composing", "ifacialmocap", "keybinds", "springbone", "vmc"):
+        if (ROOT / name).exists():
+            errors.append(f"Legacy product files must live in addons/yugo/: {name}")
+    if (ROOT / "addons/yugo/LICENSE").read_bytes() != (ROOT / "LICENSE").read_bytes():
+        errors.append("Standalone addon license must match the repository license")
+    with (ROOT / "addons/yugo/blender_manifest.toml").open("rb") as stream:
         excluded = tomllib.load(stream).get("build", {}).get("paths_exclude_pattern", [])
     for name in ("/docs/", "/AGENTS.md", "/scripts/", "/tests/"):
         if name not in excluded:

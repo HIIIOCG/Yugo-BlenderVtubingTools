@@ -10,12 +10,16 @@ require a new approval for routine work already authorized by the user.
 
 - GitHub Issues and pull requests track tasks, dependencies, validation, and
   integration. Repository files hold the rules and architecture decisions.
-- This repository currently ships the legacy `yugo` extension. Preserve its
+- The legacy `yugo` extension is in `addons/yugo/`; its tests are in
+  `tests/yugo/`. Repository governance tests are in `tests/governance/`. Preserve its
   package ID, existing releases, and working runtime while preparing the Node
   transition.
-- Yugu Node Studio is the intended direction for new development. Its source
-  import and migration are separate tasks; do not describe planned modules or
-  coordination services as implemented.
+- Yugu Node Studio is the intended direction for new development.
+  `addons/yugu_node_studio/` currently contains an explanatory README only.
+  Task #2 imports the real source after repository-layout task #8 is merged;
+  Node tests belong in `tests/yugu_node_studio/`. Do not add fake package code,
+  describe planned modules as implemented, or start the import in an old layout.
+  Tasks #3 and #4 still wait for the qualified #2 baseline.
 - Do not synchronize or overwrite live files in another checkout or the shared
   `motion_codedev/yugo*` folders. After the Node import, Git task workspaces become
   the development source of truth; the former source folders are reference
