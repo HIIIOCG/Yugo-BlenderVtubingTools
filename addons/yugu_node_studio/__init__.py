@@ -36,14 +36,16 @@ _refresh_cached_package()
 from . import network, nodes, operators, runtime, ui, vrm_cache
 from . import composing, studio, scheduler, mtoon_optimize, keyboard, flow, targets
 from . import input_nodes, input_runtime, workflow_nodes, workflow, workflow_ui
+from . import extensions
 
 _registered = False
 
 
 @persistent
 def _load_pre(_unused):
-    flow.clear()
     scheduler.suspend()
+    flow.clear()
+    extensions.cleanup("load")
     input_runtime.clear()
     keyboard.reset()
     network.stop_all()
@@ -53,7 +55,7 @@ def _load_pre(_unused):
 
 @persistent
 def _load_post(_unused):
-    scheduler.resume()
+    extensions.recover("load")
     nodes.ensure_current_sockets()
     vrm_cache.invalidate_saved_nodes()
     for tree in bpy.data.node_groups:
@@ -72,6 +74,7 @@ def _load_post(_unused):
                 node.spring_active = False
                 node.spring_status = "Stopped"
                 node.spring_last_error = ""
+    scheduler.resume()
 
 
 def _deferred_socket_migration():
@@ -102,8 +105,15 @@ def register():
     keyboard.register()
     input_runtime.register()
     _registered = True
+    try:
+        extensions.register()
+    except Exception:
+        unregister()
+        raise
     bpy.app.handlers.undo_pre.append(_undo_pre)
     bpy.app.handlers.undo_post.append(_undo_post)
+    bpy.app.handlers.redo_pre.append(_undo_pre)
+    bpy.app.handlers.redo_post.append(_undo_post)
     if _load_pre not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_load_pre)
     if _load_post not in bpy.app.handlers.load_post:
@@ -118,6 +128,7 @@ def unregister():
         return
     input_runtime.unregister()
     flow.clear()
+    extensions.unregister()
     for cls in reversed(input_nodes.CLASSES + workflow_nodes.CLASSES + workflow_ui.CLASSES):
         bpy.utils.unregister_class(cls)
     flow.unregister()
@@ -128,7 +139,9 @@ def unregister():
     studio.unregister()
     composing.unregister()
     for handlers, callback in ((bpy.app.handlers.undo_pre, _undo_pre),
-                               (bpy.app.handlers.undo_post, _undo_post)):
+                               (bpy.app.handlers.undo_post, _undo_post),
+                               (bpy.app.handlers.redo_pre, _undo_pre),
+                               (bpy.app.handlers.redo_post, _undo_post)):
         if callback in handlers:
             handlers.remove(callback)
     network.stop_all()
@@ -153,12 +166,14 @@ def unregister():
 
 @persistent
 def _undo_pre(_unused):
-    flow.clear()
     scheduler.suspend()
+    flow.clear()
+    extensions.cleanup("undo/redo")
     input_runtime.clear()
     keyboard.reset()
 
 
 @persistent
 def _undo_post(_unused):
+    extensions.recover("undo/redo")
     scheduler.resume()

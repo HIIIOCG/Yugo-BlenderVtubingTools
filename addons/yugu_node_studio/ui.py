@@ -93,6 +93,17 @@ class YUGUS_MT_add_actions(bpy.types.Menu):
         _draw_entries(self.layout, getattr(workflow_ui, "MENU_ENTRIES", ()))
 
 
+class YUGUS_MT_add_features(bpy.types.Menu):
+    bl_idname = "YUGUS_MT_add_features"
+    bl_label = "Feature Modules"
+
+    def draw(self, _context):
+        from . import extensions
+        for label, entries in extensions.menu_entries():
+            self.layout.label(text=label)
+            _draw_entries(self.layout, entries)
+
+
 
 def _draw_entries(layout, entries):
     for node_type, label in entries:
@@ -115,6 +126,9 @@ def draw_add_menu(self, context):
     layout.menu(YUGUS_MT_add_motion.bl_idname)
     layout.menu(YUGUS_MT_add_expressions.bl_idname)
     layout.menu(YUGUS_MT_add_output.bl_idname)
+    from . import extensions
+    if extensions.menu_entries():
+        layout.menu(YUGUS_MT_add_features.bl_idname)
 
 
 def draw_header(self, context):
@@ -324,6 +338,7 @@ CLASSES = (
     YUGUS_MT_add_flow,
     YUGUS_MT_add_input,
     YUGUS_MT_add_actions,
+    YUGUS_MT_add_features,
     YUGUS_PT_graph,
     YUGUS_PT_data_inspector,
     YUGUS_PT_bone_mapping,

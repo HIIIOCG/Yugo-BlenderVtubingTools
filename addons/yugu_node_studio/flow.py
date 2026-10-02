@@ -530,6 +530,10 @@ def _summary(node, text):
 
 def _action_input(socket):
     node = socket.node
+    from . import extensions
+    spec = extensions.action_spec(node.bl_idname)
+    if spec is not None:
+        return socket.bl_idname == EVENT and socket.name in (*spec.inputs, "Cancel")
     if node.bl_idname in workflow.ACTION_TYPES:
         return socket.bl_idname == EVENT
     try:
@@ -629,7 +633,8 @@ def _control_signature(node):
     )
     definition = getattr(node, "workflow_tree", None)
     target = (definition.name, workflow.is_definition(definition)) if definition is not None else None
-    return node.bl_idname, incoming, outgoing, target
+    from . import extensions
+    return node.bl_idname, incoming, outgoing, target, extensions.configuration_signature(node)
 
 
 def _event_priority(socket):
@@ -898,7 +903,10 @@ def _drain_workflow(now):
             task = callback["task"]
             node = workflow._node(task["tree"], task["node"])
             state = callback["state"]
-            valid = node is not None and _enabled(node) and _control_signature(node) == task["signature"]
+            try:
+                valid = node is not None and _enabled(node) and _control_signature(node) == task["signature"]
+            except Exception:
+                valid = False
             if valid and task["kind"] != "legacy":
                 count = workflow.running_for(node.id_data, node)
                 error = str(callback.get("error", "")) if state == "failed" else ""
@@ -933,6 +941,11 @@ def emit_event(tree, source, output_name, payload=None, now=None):
     pulse = _Pulse(tree, bpy.context.scene, now, 0.0, set(), payload=payload)
     pulse.emit(output, (_uid(source),))
     return pulse.run_id
+
+
+def drain_pending(now=None):
+    """Drain completed actions without adding a timer or advancing legacy waits."""
+    _drain_workflow(time.monotonic() if now is None else float(now))
 
 
 def tick(now=None):

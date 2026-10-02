@@ -3,6 +3,7 @@
 from collections import deque
 from copy import deepcopy
 import json
+import time
 import uuid
 
 import bpy
@@ -36,9 +37,8 @@ def _node(tree_name, uid):
 def begin(tree, payload=None, *, parent=None, continuation=None, explicit=False, metadata=None):
     """Copy the originating event once; asynchronous steps never resample it."""
     rid = uuid.uuid4().hex
-    value = deepcopy(payload if payload is not None else {})
-    # Payloads are data snapshots, never Blender RNA or mutable UI contexts.
-    json.dumps(value)
+    from .extensions import json_snapshot
+    value = json_snapshot(payload if payload is not None else {})
     _runs[rid] = {
         "run_id": rid, "root_run_id": _runs[parent]["root_run_id"] if parent in _runs else rid,
         "parent": parent, "tree": tree.name, "payload": value,
@@ -106,17 +106,19 @@ def _maybe_finish(run_id):
             finish(run_id, "end")
 
 
-def finish(run_id, state, error=""):
+def finish(run_id, state, error="", now=None):
     if not running(run_id):
         return
     run = _runs[run_id]
     run["state"], run["error"] = state, str(error)
     for child_id, child in tuple(_runs.items()):
         if child["parent"] == run_id and running(child_id):
-            finish(child_id, "failed" if state == "failed" else "cancelled", error)
+            finish(child_id, "failed" if state == "failed" else "cancelled", error, now)
     for tid in tuple(run["pending"]):
         task = _tasks.pop(tid, None)
         if task is not None:
+            from . import extensions
+            extensions.retire_task(task, state, error, now)
             _callbacks.append({"kind": "action_done", "task": task, "state": state, "error": str(error)})
     run["pending"].clear()
     if run["continuation"]:
@@ -124,7 +126,7 @@ def finish(run_id, state, error=""):
 
 
 def cancel_run(run_id, now=None):
-    finish(run_id, "cancelled")
+    finish(run_id, "cancelled", now=now)
 
 
 def _task(pulse, node, kind, **values):
@@ -140,7 +142,8 @@ def _task(pulse, node, kind, **values):
     note(pulse.run_id, node)
     if hasattr(node, "last_run_id"):
         node.last_run_id = pulse.run_id
-    node.last_summary = "Running"
+    if hasattr(node, "last_summary"):
+        node.last_summary = "Running"
     return task
 
 
@@ -161,12 +164,14 @@ def complete_task(task_id, state="end", error="", now=0.0):
     task = _tasks.pop(task_id, None)
     if task is None:
         return
+    from . import extensions
+    extensions.retire_task(task, state, error, now)
     run = _runs[task["run_id"]]
     if task["kind"] == "timer" and task.get("test"):
         _log(task, state, now)
     _callbacks.append({"kind": "action_done", "task": task, "state": state, "error": str(error)})
     if state != "end":
-        finish(task["run_id"], state, error)
+        finish(task["run_id"], state, error, now)
 
 
 def settle(task):
@@ -208,7 +213,7 @@ def _busy(pulse, node):
         return True
     if pending and policy == "RESTART":
         for task in pending:
-            finish(task.get("child", task["run_id"]), "cancelled")
+            finish(task.get("child", task["run_id"]), "cancelled", "action restarted", pulse.now)
     return False
 
 
@@ -223,7 +228,7 @@ def _cancel(pulse, node):
     else:
         pending = sorted(pending, key=lambda task: task["order"])[-1:]
     for task in pending:
-        finish(task.get("child", task["run_id"]), "cancelled")
+        finish(task.get("child", task["run_id"]), "cancelled", "Cancel input", pulse.now)
 
 
 def _child(task, tree, metadata_value, *, explicit=False):
@@ -244,6 +249,29 @@ def _start_repeat(task, now):
 def receive(pulse, node, socket, path):
     """Return True only for workflow nodes handled by this invocation engine."""
     kind = node.bl_idname
+    from . import extensions
+    spec = extensions.action_spec(kind)
+    if spec is not None:
+        extensions.prepare_module(extensions._actions[kind][0])
+        if socket.name == "Cancel":
+            _cancel(pulse, node)
+            return True
+        if socket.name not in spec.inputs:
+            return False
+        if _busy(pulse, node):
+            return True
+        timeout = max(0.0, float(getattr(node, "timeout_seconds", 0.0)))
+        task = _task(pulse, node, "extension", node_type=kind,
+                     module_id=extensions._actions[kind][0], state={},
+                     input_name=socket.name, tree_ref=extensions.object_ref(node.id_data),
+                     scene_ref=extensions.object_ref(pulse.context.scene),
+                     owner=f"ticket:{uuid.uuid4().hex}",
+                     timeout=timeout)
+        try:
+            extensions.apply_result(task, spec.start(extensions.ActionContext(task, pulse.now)), pulse.now)
+        except Exception as error:
+            complete_task(task["id"], "failed", str(error), pulse.now)
+        return True
     if kind in {"YUGUS_NODE_flow_delay", "YUGUS_NODE_flow_wait_until"} and is_definition(node.id_data):
         if socket.name == "Reset":
             _cancel(pulse, node)
@@ -346,8 +374,12 @@ def tick(now, *, advance=True):
             continue
         for (tree_name, uid), signature in tuple(run["watch"].items()):
             node = _node(tree_name, uid)
-            if node is None or not flow._enabled(node) or flow._control_signature(node) != signature:
-                finish(rid, "cancelled")
+            try:
+                valid = node is not None and flow._enabled(node) and flow._control_signature(node) == signature
+            except Exception:
+                valid = False
+            if not valid:
+                finish(rid, "cancelled", "node, settings, or links changed", now)
                 break
     if not advance:
         return
@@ -365,6 +397,28 @@ def tick(now, *, advance=True):
         elif task["kind"] in {"timer", "scoped_delay"} and now + 1e-6 >= task["deadline"]:
             failed = task.get("fail", False)
             complete_task(tid, "failed" if failed else "end", "Test Action failed" if failed else "", now)
+
+
+def poll_extensions(now):
+    """Core action polling runs after feature updates in the shared scheduler."""
+    from . import extensions
+    for tid, task in tuple(_tasks.items()):
+        if task["kind"] != "extension" or tid not in _tasks:
+            continue
+        context = extensions.ActionContext(task, now)
+        if context.node is None or context.scene is None:
+            finish(task["run_id"], "cancelled", "action target removed", now)
+            continue
+        if task["timeout"] and now >= task["created"] + task["timeout"]:
+            complete_task(tid, "failed", "Action timed out", now)
+            continue
+        spec = extensions.action_spec(task["node_type"])
+        try:
+            if spec is None:
+                raise ValueError("Action module is unavailable")
+            extensions.apply_result(task, spec.update(context, extensions.json_snapshot(task["state"])), now)
+        except Exception as error:
+            complete_task(tid, "failed", str(error), now)
 
 
 def prune():
@@ -389,6 +443,9 @@ def prune():
 
 
 def clear():
+    from . import extensions
+    for task in tuple(_tasks.values()):
+        extensions.retire_task(task, "cancelled", "workflow cleared", time.monotonic())
     _runs.clear()
     _tasks.clear()
     _joins.clear()
