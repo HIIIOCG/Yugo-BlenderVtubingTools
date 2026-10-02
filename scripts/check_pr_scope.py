@@ -54,6 +54,37 @@ def compare_declarations(pr_body: str, issue_body: str) -> dict:
     return issue
 
 
+def github_object(path: str, token: str) -> dict:
+    request = Request(
+        f"https://api.github.com/repos/{REPOSITORY}/{path}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "yugo-task-scope"},
+    )
+    with urlopen(request, timeout=30) as response:
+        data = json.loads(response.read(1048576).decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("GitHub API response must be an object")
+    return data
+
+
+def same_head_already_merged(pull: dict, token: str) -> bool:
+    """Confirm completion live; the queued event can still describe an open PR."""
+    number = pull.get("number")
+    head = pull.get("head")
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    if type(number) is not int or number < 1:
+        raise ValueError("A positive PR number is required to confirm completion")
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise ValueError("A verified PR head SHA is required to confirm completion")
+    current = github_object(f"pulls/{number}", token)
+    current_head = current.get("head")
+    return (
+        type(current.get("number")) is int and current["number"] == number
+        and current.get("state") == "closed" and current.get("merged") is True
+        and isinstance(current_head, dict) and current_head.get("sha") == head_sha
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
@@ -72,16 +103,14 @@ def main() -> int:
         token = os.environ.get("GITHUB_TOKEN")
         if not token:
             raise ValueError("GITHUB_TOKEN is required to read the canonical Issue")
-        request = Request(
-            f"https://api.github.com/repos/{REPOSITORY}/issues/{scope['task_id']}",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                     "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "yugo-task-scope"},
-        )
-        with urlopen(request, timeout=30) as response:
-            issue = json.loads(response.read(1048576).decode("utf-8"))
+        issue = github_object(f"issues/{scope['task_id']}", token)
         if issue.get("pull_request") or issue.get("number") != scope["task_id"]:
             raise ValueError("Canonical task must be a GitHub Issue")
         if issue.get("state") != "open":
+            if issue.get("state") == "closed" and same_head_already_merged(pull, token):
+                print(f"SKIP: PR #{pull['number']} at {pull['head']['sha']} is already merged; "
+                      "the canonical task is complete")
+                return 0
             raise ValueError("Canonical task must be open during development")
         scope = compare_declarations(pull.get("body") or "", issue.get("body") or "")
         policy_root = (args.policy_root or Path(__file__).resolve().parents[1]).resolve()

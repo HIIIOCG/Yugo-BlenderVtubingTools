@@ -102,6 +102,10 @@ GitHub Issue 與 PR 都必須有且只有一個 `task-scope` JSON code block，�
 整數 `task_id`（Issue 編號）、`role`、非空 `allowed_paths`。統籌角色先在 Issue
 確認範圍，PR 複製相同宣告；CI 會讀取對應 Issue 比對，不只相信 PR 自填角色。
 Issue 的負責聊天與工作路徑仍由統籌依序認領，並非帳號權限或原子鎖。
+開發中的 PR 必須對應仍開啟的 Issue。已關閉 PR 的說明更新不執行開發範圍
+檢查；若事件排隊期間 PR 已合併、Issue 已自動關閉，checker 會即時查詢
+同一 PR，只有確認相同 head commit 已合併才明確略過失效的開發檢查。
+PR 仍開啟、未合併、head 不符或無法確認時，關閉 Issue 仍會被拒絕。
 CI 的範圍檢查與 extension 驗證提供可重現的關卡；main 的 branch
 protection 是 repository 設定，需要另外核對，不能因為新增文件就宣稱啟用。
 

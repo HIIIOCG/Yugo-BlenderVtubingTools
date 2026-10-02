@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read
 
 jobs:
   governance:
@@ -28,7 +29,7 @@ jobs:
 
   scope:
     name: Canonical task scope
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.state == 'open' && github.event.pull_request.merged != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
