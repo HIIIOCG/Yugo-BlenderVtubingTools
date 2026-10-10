@@ -3,6 +3,37 @@
 All notable changes to Yugo are documented here. Version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-10
+
+### Documentation and interface fixes
+
+- README links now open the official [Yugo Handbook](https://hiiiodigital.com/Yugo-Docs/).
+- Getting Started explains installation, creating a graph, choosing a VRM
+  character, and connecting a first VMC tracking input.
+- Corrected **Compositing** in the handbook and Blender panel. Existing graph,
+  operator, and saved-property identifiers remain compatible.
+
+### Physics add-on update
+
+- Replaced the standalone **Yugo Physics Lab** with the ProtoMotions-based
+  **PhysX Tracker 0.4.0**, including the CPU PhysX runtime and learned ONNX policy.
+- The physics add-on is a separate install: download
+  `yugo_physx_tracker-0.4.0.zip` (about 242 MB) and install it alongside Yugo.
+- Native tracking, worker controls, character output, registration, and saved
+  file lifecycle are qualified on Blender 5.1.2 and 5.2.0 LTS.
+- Existing Physics Lab scenes require manual setup in the new add-on. After a
+  Yugo host reload, disable and re-enable PhysX Tracker; after loading a file,
+  start its worker manually when needed.
+
+### Downloads
+
+- `yugo-0.2.1.zip`: Yugo with the integrated Node 0.10.0 runtime.
+- `yugo_physx_tracker-0.4.0.zip`: optional independent physics add-on.
+- Both packages target Windows x64 and Blender 5.1/5.2, and include SHA-256
+  checksums and source/build provenance reports. Install the ZIPs through
+  **Preferences > Get Extensions > Install from Disk**.
+- Yugo Node Studio is a separate package and is not versioned by this release.
+
 ## [0.2.0] - 2026-10-10
 
 ### Added
@@ -68,6 +99,7 @@ All notable changes to Yugo are documented here. Version numbers follow
   interpolated 60 Hz display output
 - Network access now follows Blender's Allow Online Access preference
 
+[0.2.1]: https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.1
 [0.2.0]: https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.0
 [0.1.26]: ../../releases/tag/v0.1.26
 [0.1.14]: ../../releases/tag/v0.1.14
