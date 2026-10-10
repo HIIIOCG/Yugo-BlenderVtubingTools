@@ -12,7 +12,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  platforms:
+    uses: ./.github/workflows/yugo-platforms.yml
+    permissions:
+      contents: read
+
   release:
+    needs: platforms
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -47,10 +53,14 @@ jobs:
         run: git lfs fsck
 
       - name: Build and validate extension
+        uses: actions/download-artifact@v4
+        with:
+          name: yugo-platform-package-${{ github.sha }}
+          path: dist
+
+      - name: Validate the exact platform-qualified extension
         run: |
-          mkdir -p dist
           blender --command extension validate addons/yugo
-          blender --command extension build --source-dir addons/yugo --output-dir dist
           package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
           if [ "$(stat -c%s "$package")" -ge 52428800 ]; then
             echo "::error::Extension package is unexpectedly larger than 50 MiB"
@@ -115,6 +125,10 @@ jobs:
           version = os.environ["RELEASE_VERSION"]
           source = Path("addons/yugo")
           archive = Path("dist") / f"yugo-{version}.zip"
+          qualification = json.loads(Path("dist/platform-build.json").read_text(encoding="utf-8"))
+          assert qualification["status"] == "passed" and qualification["source_commit"] == os.environ["GITHUB_SHA"], "Platform-qualified ZIP is from another candidate"
+          assert not qualification["source_dirty"], "Qualified source was not clean"
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == qualification["package_sha256"], "Published ZIP differs from the platform-qualified archive"
           expected = {path.relative_to(source).as_posix(): path for path in source.rglob("*") if path.is_file()}
           with zipfile.ZipFile(archive) as package:
               names = [name for name in package.namelist() if not name.endswith("/")]
@@ -127,7 +141,9 @@ jobs:
           archive.with_suffix(".zip.sha256").write_text(f"{checksum}  {archive.name}\n", encoding="utf-8")
           record = {"version": version, "source_commit": os.environ["GITHUB_SHA"], "package": archive.name,
                     "package_sha256": checksum, "package_bytes": archive.stat().st_size,
-                    "byte_comparison": "passed", "source_files_sha256": file_hashes}
+                    "byte_comparison": "passed", "source_files_sha256": file_hashes,
+                    "platforms": ["windows-x64", "linux-x64", "macos-arm64"],
+                    "platform_qualification": "passed", "platform_build": qualification}
           Path("dist/release-build.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
           changelog = (source / "CHANGELOG.md").read_text(encoding="utf-8")
           match = re.search(r"^## \[" + re.escape(version) + r"\].*?\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)

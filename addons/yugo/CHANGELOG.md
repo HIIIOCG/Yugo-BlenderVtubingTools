@@ -3,6 +3,24 @@
 All notable changes to Yugo are documented here. Version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-10-10
+
+### macOS and Linux installation
+
+- Yugo now includes official CPU MuJoCo and GLFW dependencies for Windows x64,
+  Linux x64, and macOS Apple Silicon, with Blender 5.1 and 5.2.
+- Source loading selects dependencies for the current OS and architecture, so
+  native files from other platforms cannot overwrite the active runtime.
+- Release publication requires native installation, restart, Node editor, and
+  CPU physics checks for the same ZIP on each supported platform.
+- Update older Yugo installations through Install from Disk, then restart and
+  verify that the enabled Yugo entry shows 0.2.3.
+
+The separate ProtoMotions / PhysX Tracker 0.4.0 archive remains Windows x64.
+Its native runtime is independent of Yugo's built-in MuJoCo physics. Intel Macs
+require separate Blender 4.5 compatibility work because Blender 5.1 and 5.2
+support Apple Silicon on macOS.
+
 ## [0.2.2] - 2026-10-10
 
 ### Getting started fixes

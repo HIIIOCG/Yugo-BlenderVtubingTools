@@ -25,16 +25,31 @@ Yugo is designed to grow beyond avatar control into a toolkit for live performan
 
 ## Get started
 
-Yugo 0.2.2 includes Yugo Node and the original Yugo tools in one extension.
-Verified with **Blender 5.1 and 5.2**.
+**Yugo 0.2.3** includes Yugo Node and the original Yugo tools in one
+extension for **Windows x64**, **Linux x64**, and **macOS on Apple Silicon**,
+using **Blender 5.1 or 5.2**.
+Intel Macs and Blender 4.5 need a separate compatibility update.
 
-Download [yugo-0.2.2.zip](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.2), install it in **Preferences → Get Extensions → Install from Disk**, and enable **Yugo**.
+Download **yugo-0.2.3.zip** from the
+[Yugo 0.2.3 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.3).
+In Blender, open **Edit → Preferences → Get Extensions → Install from Disk**,
+select the ZIP, and enable **Yugo**.
 
 In the 3D View, press **N**, open the **Yugo** tab, and use **Open Yugo Node Editor** at the top. **Help** opens the handbook. Yugo Node is already included; no separate Node installation is needed.
 
-If you previously installed a separate **Yugo Node** or **Yugu Node Studio**, turn off that older entry in **Preferences → Add-ons** before enabling Yugo. New users can skip this step.
+If you are updating an older **Yugo 0.1.x**, save your scene, disable the old
+Yugo entry, and install the new ZIP into the same extension repository.
+Restart Blender and check that the enabled **Yugo** entry shows **0.2.3**.
+If you also installed a separate **Yugo Node** or **Yugu Node Studio**, disable
+that older entry before enabling Yugo. New users can skip these update steps.
 
-The optional [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.2/yugo_physx_tracker-0.4.0.zip) replaces the standalone Physics Lab. Install its separate ZIP (about 242 MB) alongside Yugo.
+The optional [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.2/yugo_physx_tracker-0.4.0.zip)
+is a separate **Windows x64** add-on for Blender 5.1/5.2. Its existing package
+and checksum are unchanged; Linux and macOS PhysX support is not included in
+this release. Install its ZIP (about 242 MB) after enabling Yugo, then open
+the node editor and choose **Add → PhysX Physics → Create PhysX Tracker Demo**.
+Click **Play** on the **PhysX Physics** node to try the supplied skeleton and
+walking example. Your own VRM is not required for this demo.
 
 - [User documentation and Getting Started](https://hiiiodigital.com/Yugo-Docs/)
 - [Report an issue](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)
