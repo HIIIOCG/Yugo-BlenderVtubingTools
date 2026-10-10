@@ -7,22 +7,34 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: yugo-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Check tag and release metadata
+      - name: Check tag, main ancestry and immutable release
         id: metadata
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(python scripts/check_version.py --tag "$RELEASE_TAG" --print-version)
+          version=$(python -B scripts/check_version.py --tag "$RELEASE_TAG" --print-version)
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Existing releases are immutable; create a new product version"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install Blender 5.1
@@ -42,6 +54,45 @@ jobs:
           fi
           blender --command extension validate "$package"
 
+      - name: Verify package bytes and prepare release notes
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, re, zipfile
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          source = Path("addons/yugo")
+          archive = Path("dist") / f"yugo-{version}.zip"
+          expected = {path.relative_to(source).as_posix(): path for path in source.rglob("*") if path.is_file()}
+          with zipfile.ZipFile(archive) as package:
+              names = [name for name in package.namelist() if not name.endswith("/")]
+              assert len(names) == len(set(names)) and set(names) == set(expected), "Package file set differs from source"
+              assert package.testzip() is None, "Package ZIP is corrupt"
+              for name in names:
+                  assert package.read(name) == expected[name].read_bytes(), f"Package bytes differ: {name}"
+          file_hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in sorted(expected.items())}
+          checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+          archive.with_suffix(".zip.sha256").write_text(f"{checksum}  {archive.name}\n", encoding="utf-8")
+          record = {"version": version, "source_commit": os.environ["GITHUB_SHA"], "package": archive.name,
+                    "package_sha256": checksum, "package_bytes": archive.stat().st_size,
+                    "byte_comparison": "passed", "source_files_sha256": file_hashes}
+          Path("dist/release-build.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          changelog = (source / "CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(r"^## \[" + re.escape(version) + r"\].*?\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
+          assert match, "Missing release changelog section"
+          notes = match.group(1).split("\n[0.", 1)[0].strip()
+          notes += f"\n\nSource commit: `{record['source_commit']}`\n\nSHA-256: `{checksum}`\n"
+          Path("dist/release-notes.md").write_text(notes, encoding="utf-8")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yugo-release-validation
+          path: dist/
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,8 +102,8 @@ jobs:
             echo "::error::Existing releases are immutable; create a new product version"
             exit 1
           else
-            gh release create "$GITHUB_REF_NAME" "$package" \
+            gh release create "$GITHUB_REF_NAME" "$package" "$package.sha256" "dist/release-build.json" \
               --title "Yugo ${{ steps.metadata.outputs.version }}" \
-              --generate-notes \
+              --notes-file dist/release-notes.md \
               --verify-tag
           fi

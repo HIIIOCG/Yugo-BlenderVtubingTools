@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "yugo"
-version = "0.1.26"
+version = "0.2.0"
 name = "Yugo"
 tagline = "Avatar motion layers, nodes, physics, camera and compositing"
 maintainer = "Yugo Contributors"
