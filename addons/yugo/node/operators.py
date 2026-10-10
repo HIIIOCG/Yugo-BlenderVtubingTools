@@ -82,8 +82,16 @@ class YUGUS_OT_open_editor(bpy.types.Operator):
                 None,
             )
         if tree is None:
-            tree = bpy.data.node_groups.new("Yugo Node", TREE_ID)
-            context.scene.yugu_node_studio_tree = tree
+            result = bpy.ops.yugu_node_studio.new_graph()
+            if result != {"FINISHED"}:
+                return {"CANCELLED"}
+            tree = context.scene.yugu_node_studio_tree
+            for node in tree.nodes:
+                if node.bl_idname == "YUGUS_NODE_hz_trigger":
+                    node.mute = True
+                    tree["yugo_onboarding_clock"] = node.runtime_id
+            tree.last_status = "Example ready: choose Character and Action; click Start Outputs in N > Yugo"
+        context.scene.yugu_node_studio_tree = tree
         context.area.type = "NODE_EDITOR"
         space = context.area.spaces.active
         space.tree_type = TREE_ID
@@ -92,6 +100,11 @@ class YUGUS_OT_open_editor(bpy.types.Operator):
             space.path.start(tree)
         except (AttributeError, RuntimeError, TypeError):
             pass
+        region = next((item for item in context.area.regions if item.type == "WINDOW"), None)
+        if region is not None:
+            with context.temp_override(area=context.area, region=region):
+                if bpy.ops.node.view_all.poll():
+                    bpy.ops.node.view_all()
         return {"FINISHED"}
 
 

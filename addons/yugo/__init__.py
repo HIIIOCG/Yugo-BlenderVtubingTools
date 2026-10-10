@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Yugo",
     "author": "Yugo Contributors",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (5, 1, 0),
     "location": "View3D / Node Editor > Sidebar > Yugo",
     "description": "Avatar motion layers, nodes, physics, camera and compositing",
@@ -81,8 +81,9 @@ def _check_node_owner():
     owner = bpy.types.NodeTree.bl_rna_get_subclass_py(node.constants.TREE_ID, None)
     if owner is not None and owner is not node.nodes.YUGUS_NT_humanoid_motion:
         raise RuntimeError(
-            "Another Yugo Node / Yugu Node Studio add-on is enabled. "
-            "Disable that add-on before enabling the integrated Yugo."
+            "Another Yugo Node installation is already enabled. Yugo includes its "
+            "own Node editor. Disable the older, separate Yugo Node "
+            "or Yugu Node Studio entry in Preferences > Add-ons, then enable Yugo."
         )
 
 

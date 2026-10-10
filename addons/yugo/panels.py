@@ -576,20 +576,74 @@ class YUGO_PT_base:
     bl_category = "Yugo"
 
 
-def draw_addon_start(layout, region_width):
+def draw_addon_start(layout, region_width, *, include_view_window=True):
     buttons = indented_column(layout, region_width)
+    editor_row = buttons.row()
+    editor_row.scale_y = 1.65
+    editor_row.operator("yugu_node_studio.open_editor", text="Open Yugo Node Editor", icon="NODETREE")
+    buttons.separator(factor=0.85)
     utility_row = buttons.row(align=True)
     utility_row.operator("yugo.setting_popup", text="Setting", icon="PREFERENCES")
     utility_row.operator("yugo.help_placeholder", text="Help", icon="HELP")
     buttons.separator(factor=0.85)
-    view_row = buttons.row(align=True)
-    view_row.scale_y = 1.35
-    view_split = view_row.split(factor=0.86, align=True)
-    view_split.operator("yugo.view_window", text="No UI Window", icon="WINDOW")
-    view_split.operator("yugo.view_window_settings", text="", icon="PREFERENCES")
+    if include_view_window:
+        view_row = buttons.row(align=True)
+        view_row.scale_y = 1.35
+        view_split = view_row.split(factor=0.86, align=True)
+        view_split.operator("yugo.view_window", text="No UI Window", icon="WINDOW")
+        view_split.operator("yugo.view_window_settings", text="", icon="PREFERENCES")
     fast_started = buttons.row()
     fast_started.scale_y = 1.65
+    fast_started.operator_context = "INVOKE_DEFAULT"
     fast_started.operator("yugo.fast_started", text="Fast Started")
+
+
+def draw_starter_controls(layout, context):
+    import textwrap
+    from .quick_start import context_tree, starter_clock, starter_warnings
+    tree = context_tree(context)
+    clock = starter_clock(tree)
+    if clock is None:
+        return
+    box = layout.box()
+    box.label(text=tree.name, icon="NODETREE")
+    box.label(text="Outputs paused" if clock.mute else "Outputs running")
+    row = box.row()
+    row.scale_y = 1.4
+    row.operator("yugo.starter_output_toggle",
+                 text="Start Outputs" if clock.mute else "Pause Outputs",
+                 icon="PLAY" if clock.mute else "PAUSE")
+    if tree.get("yugo_fast_started"):
+        box.label(text="Set receiver address / port, then connect.", icon="INFO")
+    else:
+        box.label(text="Choose Character and Action in the example.", icon="INFO")
+    warnings = starter_warnings(tree)
+    if warnings:
+        warning = box.column()
+        warning.alert = True
+        for paragraph in warnings:
+            for line in textwrap.wrap(paragraph, width=42):
+                warning.label(text=line, icon="ERROR")
+
+
+class YUGO_PT_node_start(YUGO_PT_base, bpy.types.Panel):
+    bl_space_type = "NODE_EDITOR"
+    bl_idname = "YUGO_PT_node_start"
+    bl_label = "Yugo"
+    bl_order = -100
+
+    @classmethod
+    def poll(cls, context):
+        from .node.constants import TREE_ID
+        return getattr(getattr(context, "space_data", None), "tree_type", "") == TREE_ID
+
+    def draw(self, context):
+        from .quick_start import context_tree
+        draw_addon_start(self.layout, context.region.width, include_view_window=False)
+        tree = context_tree(context)
+        if tree is not None:
+            self.layout.label(text=f"Current graph: {tree.name}", icon="NODETREE")
+        draw_starter_controls(self.layout, context)
 
 
 class YUGO_PT_avatar(YUGO_PT_base, bpy.types.Panel):
@@ -601,6 +655,7 @@ class YUGO_PT_avatar(YUGO_PT_base, bpy.types.Panel):
         scene = context.scene
 
         draw_addon_start(layout, context.region.width)
+        draw_starter_controls(layout, context)
         layout.separator()
 
         layout.label(text="Avatar List")
@@ -737,6 +792,7 @@ class YUGO_PT_motion_layers(YUGO_PT_base, bpy.types.Panel):
 
 
 CLASSES = (
+    YUGO_PT_node_start,
     YUGO_MT_source_type,
     YUGO_PT_avatar,
     YUGO_PT_character_meta,

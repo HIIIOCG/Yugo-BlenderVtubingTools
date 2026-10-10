@@ -3,6 +3,32 @@
 All notable changes to Yugo are documented here. Version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-10-10
+
+### Getting started fixes
+
+- **Fast Started** now creates a connected Yugo Node graph for the selected
+  character and supported VMC / iFacialMocap tracking sources. VMC face and
+  body share one receiver. The setup opens the editor and shows the next steps.
+- Added **Start Outputs** and **Pause Outputs** controls. A new starter begins
+  with receivers disconnected and outputs paused; set your connection details,
+  connect the receiver, then start outputs.
+- **Help** now opens the official [Yugo Handbook](https://hiiiodigital.com/Yugo-Docs/).
+- **Open Yugo Node Editor** is at the top of the Yugo sidebar, including when
+  the Avatar List is empty. The first editor opening creates a visible example;
+  opening an existing graph keeps its content and synchronizes its selection.
+- Simplified installation instructions: install and enable **Yugo**, which
+  already includes Yugo Node. Only users who previously installed a separate
+  Yugo Node or Yugu Node Studio need to disable that older entry.
+- Updated the handbook with the exact button locations and a guided first setup.
+
+### Downloads
+
+- Install `yugo-0.2.2.zip` through **Preferences > Get Extensions > Install from Disk**.
+- The optional ProtoMotions / **PhysX Tracker 0.4.0** is also supplied as the
+  separate `yugo_physx_tracker-0.4.0.zip` (about 242 MB), with its SHA-256 checksum
+  and build provenance. Install it alongside Yugo when needed.
+
 ## [0.2.1] - 2026-10-10
 
 ### Documentation and interface fixes
