@@ -81,7 +81,8 @@ def _check_node_owner():
     owner = bpy.types.NodeTree.bl_rna_get_subclass_py(node.constants.TREE_ID, None)
     if owner is not None and owner is not node.nodes.YUGUS_NT_humanoid_motion:
         raise RuntimeError(
-            "Yugo already includes Yugo Node. Disable the older, separate Yugo Node "
+            "Another Yugo Node installation is already enabled. Yugo includes its "
+            "own Node editor. Disable the older, separate Yugo Node "
             "or Yugu Node Studio entry in Preferences > Add-ons, then enable Yugo."
         )
 

@@ -13,8 +13,9 @@ owns the integration and release of the follow-up onboarding fixes.
   including its provenance manifest, and 79 Git LFS objects.
 - Handbook dependency: [Yugo-Docs PR #4](https://github.com/HIIIOCG/Yugo-Docs/pull/4),
   reviewed and merged at `58ca8ea1bef2cb179750d71438e57e8b20806d45`.
-  Its existing Pages workflow must finish and the public guide must be verified
-  before the package is published.
+  Existing Pages [run 38028049151](https://github.com/HIIIOCG/Yugo-Docs/actions/runs/38028049151)
+  completed successfully from this commit. Four public routes returned HTTP 200
+  and their article bytes matched the reviewed build before package publication.
 
 Fast Started now creates a connected tracking graph, selects the character,
 opens the editor, and starts with outputs paused and receivers disconnected.
@@ -52,11 +53,15 @@ git lfs fsck
 & $TaskPython -B artifacts/build-main-private.py
 & $TaskPython -B scripts/physx_build.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --output dist --require-clean
 
-& $TaskPython -B scripts/run_fusion_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --package dist/yugo-0.2.2.zip --output artifacts/release-final-yugo-51 --vrm-source 'C:/Users/User/AppData/Roaming/Blender Foundation/Blender/5.1/extensions/blender_org/vrm' --test onboarding --test lifecycle --test save_lifecycle --test receiver_reconnect --test release_scope --test visual_compatibility
-& $TaskPython -B scripts/run_fusion_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --package dist/yugo-0.2.2.zip --output artifacts/release-final-yugo-52 --vrm-source 'C:/Users/User/AppData/Roaming/Blender Foundation/Blender/5.2/extensions/blender_org/vrm' --test onboarding --test lifecycle --test save_lifecycle --test receiver_reconnect --test release_scope --test visual_compatibility
-& $TaskPython -B scripts/physx_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --package dist/yugo_physx_tracker-0.4.0.zip --output artifacts/release-final-physx-51
-& $TaskPython -B scripts/physx_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --package dist/yugo_physx_tracker-0.4.0.zip --output artifacts/release-final-physx-52
+& $TaskPython -B scripts/run_fusion_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --package dist/yugo-0.2.2.zip --output artifacts/release-qualified-yugo-51 --vrm-source 'C:/Users/User/AppData/Roaming/Blender Foundation/Blender/5.1/extensions/blender_org/vrm' --test onboarding --test lifecycle --test save_lifecycle --test receiver_reconnect --test release_scope --test visual_compatibility
+& $TaskPython -B scripts/run_fusion_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --package dist/yugo-0.2.2.zip --output artifacts/release-qualified-yugo-52 --vrm-source 'C:/Users/User/AppData/Roaming/Blender Foundation/Blender/5.2/extensions/blender_org/vrm' --test onboarding --test lifecycle --test save_lifecycle --test receiver_reconnect --test release_scope --test visual_compatibility
+& $TaskPython -B scripts/physx_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --package dist/yugo_physx_tracker-0.4.0.zip --output artifacts/release-qualified-physx-51
+& $TaskPython -B scripts/physx_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --package dist/yugo_physx_tracker-0.4.0.zip --output artifacts/release-qualified-physx-52
 & $TaskPython -B artifacts/collect-final-qualification.py
+
+& $TaskPython -B scripts/node_build.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --output artifacts/studio-message-build --require-clean
+& $TaskPython -B scripts/node_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.1/blender.exe' --package artifacts/studio-message-build/yugu_node_studio-0.7.0.zip --output artifacts/studio-message-51 --test blender_studio.py
+& $TaskPython -B scripts/node_run_checks.py --blender 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --package artifacts/studio-message-build/yugu_node_studio-0.7.0.zip --output artifacts/studio-message-52 --test blender_studio.py
 ```
 
 The main build wrapper applies `node_environment.isolated_environment` to
@@ -73,6 +78,7 @@ source changes. No active Blender or installed extension is modified.
 | Main and PhysX source/ZIP validation and complete file-set/byte identity | Passed |
 | Version, governance, task scope, whitespace and LFS object integrity | Passed |
 | Governance unit suite | 67 tests, OK; one Windows symlink-privilege skip |
+| Studio source registration conflict check on both Blender versions, with five portable checks each | 12 passed |
 | Handbook build/link/content checks and independent desktop/mobile browser QA | Passed |
 
 The onboarding checks exercise a real clock-driven body Apply, pose ownership,
@@ -88,24 +94,31 @@ qualify a private avatar, .vrm file importer, live phone/UDP reception, or a
 separate facial Apply write. The body test injects typed motion at the receiver
 snapshot boundary. No received/private character material was available.
 
-Final reports are under `artifacts/release-final-yugo-51`, `release-final-yugo-52`,
-`release-final-physx-51`, and `release-final-physx-52`.
+Final reports are under `artifacts/release-qualified-yugo-51`, `release-qualified-yugo-52`,
+`release-qualified-physx-51`, and `release-qualified-physx-52`.
 `artifacts/final-qualification.json` collects exact reports, fixture versions,
 source/test/tool hashes and package checksums. Runs made before the final
 registration-message wording fix remain as non-qualifying history.
+
+The targeted Studio checks load repository source; its separate builder proves
+ZIP/source identity. `artifacts/studio-message-qualification.json` records exact
+commands, source/test hashes and reports. Studio's unchanged 52-file ZIP is
+412,919 bytes, SHA-256
+`ff65fec07452b4f68de022b69ad19e898f863b1efe7e5179ad1c3e492efd6218`.
 
 ## Local packages and publication gate
 
 | Local tested package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| yugo-0.2.2.zip | 10,415,337 | `30f28b048444137aae1d04e7c934c73edafae62a08714a644670d3e3d2019f76` |
+| yugo-0.2.2.zip | 10,415,359 | `9d799e5cdbac0ec86871bb9a1decbd49f52fb07a41da35e2871c12145fe2a1d0` |
 | yugo_physx_tracker-0.4.0.zip | 241,385,867 | `5c1040aa5bed7841e5c6ae98c64393202d0f089d34b9b33939276d6f8f95a8fd` |
 
 ZIP-container checksums can change on the CI build; unpacked source bytes must
-match the qualified candidate exactly. Test reports record the baseline HEAD
-because they precede the final documentation commit. Integration compares the
-final candidate runtime/test/tool bytes against the recorded hashes, then
-compares the merged tree with the qualified tree.
+match the qualified candidate exactly. Test reports record launch-time HEAD
+`11c34a6fe622148cb12597a6d76bd6471b36ed37`; the final registration wording
+was still uncommitted during these runs. Recorded full source hashes identify
+the tested bytes. Integration compares the final candidate runtime/test/tool
+bytes against those hashes, then compares the merged tree with the qualified tree.
 
 The new `v0.2.2` tag uses the existing legacy release workflow. It publishes six
 assets: Yugo ZIP/checksum/build report and separate PhysX ZIP/checksum/build
