@@ -43,6 +43,14 @@ IMAGE_NODE_TO_NATIVE_NODE = {
 _SYNC_IN_PROGRESS = False
 
 
+def _is_custom_node(node: Node) -> bool:
+    return bool(node.get(NODE_TAG_KEY) or node.get("yugus_mtoon_custom_node"))
+
+
+def _has_custom_shader(node_tree: NodeTree) -> bool:
+    return bool(node_tree.get(GROUP_TAG_KEY) or node_tree.get("yugus_mtoon_custom_group"))
+
+
 def _preset_path() -> Path:
     return Path(__file__).with_name("preset.blend")
 
@@ -360,7 +368,7 @@ def _clone_custom_nodes(
 ) -> tuple[dict[Node, Node], list[Node]]:
     source_frame, source_nodes = _custom_frame_nodes(source_tree)
     previous_nodes = [
-        node for node in target_tree.nodes if bool(node.get(NODE_TAG_KEY))
+        node for node in target_tree.nodes if _is_custom_node(node)
     ]
     offset_x, offset_y = _node_layout_offset(
         source_frame,
@@ -588,13 +596,13 @@ def _migrate_legacy_shadow_mix(
 
 def _sync_material(material: Material) -> None:
     node_tree = material.node_tree
-    if node_tree is None or not bool(node_tree.get(GROUP_TAG_KEY)):
+    if node_tree is None or not _has_custom_shader(node_tree):
         return
     official_node = _find_official_output_node(material)
     if official_node is None:
         return
     created_nodes = [
-        node for node in node_tree.nodes if bool(node.get(NODE_TAG_KEY))
+        node for node in node_tree.nodes if _is_custom_node(node)
     ]
     migrated = _migrate_legacy_shadow_mix(material, official_node)
     _sync_parameter_values(node_tree, official_node, created_nodes)
@@ -678,7 +686,7 @@ def install_custom_shader(
 
     _set_blended_render_method(material, official_node)
 
-    already_installed = bool(material.node_tree.get(GROUP_TAG_KEY))
+    already_installed = _has_custom_shader(material.node_tree)
     if not _migrate_legacy_shadow_mix(material, official_node) and not already_installed:
         # Shadow Mix is an Optimize-time preprocessing step. Apply it to the
         # native MToon value before copying any custom nodes, then never read

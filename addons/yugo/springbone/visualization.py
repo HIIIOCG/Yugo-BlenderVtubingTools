@@ -109,7 +109,9 @@ def collect_displays(armature, extension) -> list[HitRadiusDisplay]:
 
 
 def clear(owner_id: str | None = None) -> None:
-    for obj in tuple(bpy.data.objects):
+    # Failed extension enable can unwind under Blender's RestrictBlend context.
+    # No runtime display can be created there, and scene data is unavailable.
+    for obj in tuple(getattr(bpy.data, "objects", ())):
         try:
             is_marker = bool(obj.get(MARKER_PROPERTY, False))
             marker_owner = str(obj.get(OWNER_PROPERTY, "") or "")
