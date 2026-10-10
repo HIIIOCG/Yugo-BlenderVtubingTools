@@ -1,0 +1,82 @@
+name: Qualify Yugo platforms
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: bradyajohnston/setup-blender@v5
+        with:
+          version: "5.1.2"
+      - name: Build the universal candidate
+        run: |
+          python -B scripts/check_version.py
+          python -B scripts/yugo_platform_check.py --blender "$(command -v blender)" --build-only --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yugo-platform-package-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/platform-build.json
+          if-no-files-found: error
+
+  native:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        blender: ["5.1.2", "5.2.0"]
+        include:
+          - os: windows-2022
+            platform: windows-x64
+          - os: ubuntu-24.04
+            platform: linux-x64
+          - os: macos-15
+            platform: macos-arm64
+        os: [windows-2022, ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: bradyajohnston/setup-blender@v5
+        with:
+          version: ${{ matrix.blender }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: yugo-platform-package-${{ github.sha }}
+          path: dist
+      - name: Qualify installation and source physics
+        shell: bash
+        run: |
+          unset MUJOCO_GL PYGLFW_LIBRARY
+          blender=$(python -c 'import shutil; print(shutil.which("blender") or "")')
+          test -n "$blender"
+          version=$(python -B scripts/check_version.py --print-version)
+          package="dist/yugo-$version.zip"
+          python -B -m unittest discover -s tests/yugo_node -p test_mujoco_dependency.py
+          python -B scripts/yugo_platform_check.py --blender "$blender" --package "$package" --platform "${{ matrix.platform }}" --output artifacts/platform
+          python -B scripts/run_fusion_checks.py --blender "$blender" --package "$package" --test lifecycle --test onboarding --test physics_live --output artifacts/fusion
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yugo-${{ matrix.platform }}-${{ matrix.blender }}-${{ github.sha }}
+          path: |
+            artifacts/platform/**/*.json
+            artifacts/platform/**/*.log
+            artifacts/fusion/**/*.json
+            artifacts/fusion/**/*.log
+          if-no-files-found: error

@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
+from contextlib import contextmanager
+import os
 from pathlib import Path
+import platform
+import stat
 import sys
+import sysconfig
 import tempfile
 import zipfile
 
@@ -18,44 +24,226 @@ REQUIRED_API = (
     'MjModel', 'MjData', 'mj_forward', 'mj_step', 'mj_resetData',
     'mj_name2id', 'mj_objectVelocity', 'mj_versionString',
 )
+COMMON_WHEELS = (
+    'absl_py-2.5.0-py3-none-any.whl',
+    'etils-1.14.0-py3-none-any.whl',
+    'fsspec-2026.9.0-py3-none-any.whl',
+    'pyopengl-3.1.10-py3-none-any.whl',
+    'typing_extensions-4.16.0-py3-none-any.whl',
+    'zipp-4.1.1-py3-none-any.whl',
+)
+NATIVE_WHEELS = {
+    ('win32', 'x86_64'): (
+        'mujoco-3.3.7-cp313-cp313-win_amd64.whl',
+        'glfw-2.10.2-py2.py3-none-win_amd64.whl',
+    ),
+    ('linux', 'x86_64'): (
+        'mujoco-3.3.7-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl',
+        'glfw-2.10.2-py2.py3-none-manylinux2014_x86_64.whl',
+    ),
+    ('darwin', 'arm64'): (
+        'mujoco-3.3.7-cp313-cp313-macosx_11_0_arm64.whl',
+        'glfw-2.10.2-py2.py3-none-macosx_11_0_arm64.whl',
+    ),
+}
+
+
+def _selected_wheels(directory, *, system=None, machine=None, python_version=None):
+    """Select this release's exact ABI/architecture pair and pure dependencies."""
+    system = sys.platform if system is None else system
+    machine = platform.machine() if machine is None else machine
+    machine = machine.lower()
+    machine = {'amd64': 'x86_64', 'aarch64': 'arm64'}.get(machine, machine)
+    python_version = sys.version_info[:2] if python_version is None else python_version
+    if (tuple(python_version) != (3, 13) or sys.implementation.name != 'cpython'
+            or sys.maxsize <= 2**32 or sysconfig.get_config_var('Py_GIL_DISABLED')):
+        raise RuntimeError('The bundled MuJoCo engine requires 64-bit CPython 3.13 '
+                           '(Blender 5.1 / 5.2), without the free-threaded ABI')
+    native = NATIVE_WHEELS.get((system, machine))
+    if native is None:
+        raise RuntimeError(f'No bundled MuJoCo engine for {system} / {machine}. '
+                           'Supported hosts: Windows x64, Linux x64 and Apple Silicon macOS')
+    wheels = tuple(sorted(Path(directory) / name for name in (*COMMON_WHEELS, *native)))
+    missing = [path.name for path in wheels if not path.is_file()]
+    if missing:
+        raise RuntimeError('Bundled MuJoCo dependencies are missing: ' + ', '.join(missing)
+                           + '. Reinstall the complete Yugo extension')
+    return wheels
+
+
+def _cache_wheels(wheels):
+    """Cache only selected wheels; foreign native packages never share a cache."""
+    digest = hashlib.sha256()
+    for path in wheels:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    destination = Path(tempfile.gettempdir()) / 'yugo_node_mujoco' / digest.hexdigest()[:20]
+    marker = destination / '.complete'
+    if not marker.is_file():
+        destination.mkdir(parents=True, exist_ok=True)
+        try:
+            for path in wheels:
+                with zipfile.ZipFile(path) as archive:
+                    root = destination.resolve()
+                    for member in archive.infolist():
+                        # ZipInfo normalizes backslashes on Windows; inspect
+                        # the original archive name before trusting that path.
+                        name = member.orig_filename
+                        target = (root / name).resolve()
+                        if (not name or name != member.filename or '\\' in name or ':' in name
+                                or not target.is_relative_to(root)
+                                or stat.S_ISLNK(member.external_attr >> 16)):
+                            raise RuntimeError('MuJoCo wheel contains an invalid path')
+                    archive.extractall(destination)
+        except (OSError, zipfile.BadZipFile) as error:
+            raise RuntimeError(f'Cannot unpack bundled MuJoCo dependencies: {error}') from error
+        marker.write_text('Official MuJoCo wheel runtime\n', encoding='utf-8')
+    return destination
+
+
+@contextmanager
+def _packaged_glfw_library():
+    """Avoid pyGLFW launching Blender as Python during its library search.
+
+    Select only the library next to the already-resolved Python package. Honor
+    explicit user settings and loaded consumers, and restore our temporary
+    setting even when import fails. The MuJoCo rendering backend is untouched.
+    """
+    if (sys.platform not in {'linux', 'darwin'} or 'bpy' not in sys.modules
+            or 'glfw' in sys.modules or os.environ.get('PYGLFW_LIBRARY')):
+        yield
+        return
+    spec = importlib.util.find_spec('glfw')
+    if spec is None or not spec.origin:
+        yield
+        return
+    package = Path(spec.origin).resolve().parent
+    if sys.platform == 'darwin':
+        library = package / 'libglfw.3.dylib'
+    else:
+        variant = os.environ.get('PYGLFW_LIBRARY_VARIANT', '').lower()
+        if variant not in {'x11', 'wayland'}:
+            variant = 'wayland' if os.environ.get('XDG_SESSION_TYPE') == 'wayland' else 'x11'
+        library = package / variant / 'libglfw.so'
+    if not library.is_file() or not library.resolve().is_relative_to(package):
+        raise RuntimeError('The GLFW native library is missing from its Python package: '
+                           f'{library}. Reinstall the complete Yugo extension')
+    value = str(library)
+    previous = os.environ.get('PYGLFW_LIBRARY')
+    os.environ['PYGLFW_LIBRARY'] = value
+    try:
+        yield
+    finally:
+        # Respect a consumer that deliberately changed the setting during import.
+        if os.environ.get('PYGLFW_LIBRARY') == value:
+            if previous is None:
+                os.environ.pop('PYGLFW_LIBRARY', None)
+            else:
+                os.environ['PYGLFW_LIBRARY'] = previous
+
+
+def _import_mujoco():
+    if 'mujoco' in sys.modules:
+        return importlib.import_module('mujoco')
+    # macOS uses CGL; Linux may have an explicitly selected EGL/OSMesa backend.
+    # Only the default Linux GLFW import needs our embedded-host workaround.
+    backend = os.environ.get('MUJOCO_GL', '').lower().strip()
+    if sys.platform == 'linux' and backend in {'', 'glfw', 'glx', 'enable', 'enabled', 'on', 'true', '1'}:
+        with _packaged_glfw_library():
+            return importlib.import_module('mujoco')
+    return importlib.import_module('mujoco')
+
+
+def _allocator_probe(engine):
+    """Dispose the probe with the current allocator before installing any hooks."""
+    model = data = None
+    try:
+        if sys.platform == 'linux':
+            model = engine.MjModel.from_xml_string(
+                '<mujoco><worldbody><body><freejoint/>'
+                '<geom type="sphere" size="0.1" density="1000"/>'
+                '</body></worldbody></mujoco>')
+            data = engine.MjData(model)
+        else:
+            model = engine.MjModel.from_xml_string('<mujoco/>')
+    finally:
+        # Exceptions retain traceback locals; release these before swapping the
+        # global free hook, including when a model succeeds but its data fails.
+        data = None
+        model = None
+
+
+def _linux_native_allocator_active(engine):
+    """Python getters cannot see hooks installed directly by native consumers."""
+    import ctypes
+    path = Path(engine.__file__).resolve().parent / f'libmujoco.so.{engine.__version__}'
+    try:
+        native = ctypes.CDLL(str(path))
+        return any(ctypes.c_void_p.in_dll(native, name).value
+                   for name in ('mju_user_malloc', 'mju_user_free'))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'Cannot inspect the loaded MuJoCo allocator: {error}') from error
 
 
 def _host_allocator(engine):
-    """Use MuJoCo's official paired hooks for Blender's Windows CRT host.
+    """Use MuJoCo's official paired hooks when Blender's allocation fails.
 
     Blender's host allocator can intercept the wheel's aligned allocation.
-    Explicit UCRT allocation preserves MuJoCo's required 64-byte alignment.
+    Explicit UCRT/glibc allocation preserves MuJoCo's 64-byte alignment.
     Keep callbacks pinned on the engine module for native model lifetimes,
     including extension reloads. Existing application hooks remain authoritative.
     """
-    if sys.platform != "win32" or "bpy" not in sys.modules:
+    if sys.platform not in {'win32', 'linux'} or "bpy" not in sys.modules:
         return
     if (engine.get_mju_user_malloc() is not None
             or engine.get_mju_user_free() is not None):
         return
+    if sys.platform == 'linux' and _linux_native_allocator_active(engine):
+        return
     try:
-        probe = engine.MjModel.from_xml_string("<mujoco/>")
+        _allocator_probe(engine)
     except Exception as error:
         if "Could not allocate memory" not in str(error):
             raise RuntimeError(f"Cannot initialize MuJoCo in Blender: {error}") from error
     else:
-        del probe
         return
     import ctypes
-    crt = ctypes.CDLL("ucrtbase.dll")
-    allocate = crt._aligned_malloc
-    allocate.argtypes = (ctypes.c_size_t, ctypes.c_size_t)
-    allocate.restype = ctypes.c_void_p
-    release = crt._aligned_free
+    if sys.platform == 'win32':
+        crt = ctypes.CDLL("ucrtbase.dll")
+        allocate = crt._aligned_malloc
+        allocate.argtypes = (ctypes.c_size_t, ctypes.c_size_t)
+        allocate.restype = ctypes.c_void_p
+        aligned_allocate = lambda size: allocate(max(int(size), 64), 64)
+        release = crt._aligned_free
+    else:
+        # Supported Linux wheels require glibc. Resolve its own allocator pair,
+        # not symbols in the Blender process (CDLL(None)) which may interpose it.
+        crt = ctypes.CDLL('libc.so.6')
+        allocate = crt.posix_memalign
+        allocate.argtypes = (ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t)
+        allocate.restype = ctypes.c_int
+        release = crt.free
+
+        def aligned_allocate(size):
+            pointer = ctypes.c_void_p()
+            result = allocate(ctypes.byref(pointer), 64, max(int(size), 64))
+            return pointer.value if result == 0 else None
+
     release.argtypes = (ctypes.c_void_p,)
     release.restype = None
     malloc_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
     free_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
-    malloc_hook = malloc_type(lambda size: allocate(max(int(size), 64), 64))
+    malloc_hook = malloc_type(aligned_allocate)
     free_hook = free_type(lambda pointer: release(pointer))
     engine._yugo_allocator_refs = (crt, allocate, release, malloc_hook, free_hook)
     engine.set_mju_user_malloc(malloc_hook)
     engine.set_mju_user_free(free_hook)
+    try:
+        _allocator_probe(engine)
+    except Exception as error:
+        # 3.3.7's setters(None) leave the C pointer intact. Never unpin/clear a
+        # published callback, even when the post-install probe fails.
+        raise RuntimeError(f'Cannot initialize MuJoCo with the native allocator: {error}') from error
 
 
 def load_mujoco():
@@ -67,7 +255,7 @@ def load_mujoco():
     # an ABI dependency already in use by Blender or another extension.
     import numpy  # noqa: F401
     try:
-        engine = importlib.import_module("mujoco")
+        engine = _import_mujoco()
         _check_version(engine)
         _host_allocator(engine)
         _engine = engine
@@ -75,41 +263,16 @@ def load_mujoco():
     except ModuleNotFoundError as error:
         if error.name != "mujoco":
             raise RuntimeError(f"MuJoCo dependency is missing: {error.name}") from error
+    except (ImportError, OSError) as error:
+        raise RuntimeError(f"Cannot load the official MuJoCo engine: {error}") from error
     wheel_dir = Path(__file__).with_name("wheels")
-    wheels = sorted(wheel_dir.glob("*.whl"))
-    engine_wheels = [path for path in wheels if path.name.startswith("mujoco-")]
-    tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    if (sys.platform != "win32" or not engine_wheels
-            or not any(f"-{tag}-{tag}-win_amd64" in path.name for path in engine_wheels)):
-        raise RuntimeError("MuJoCo needs a compatible official wheel. Install the "
-                            "Yugo Node for Windows / Blender 5.1–5.2.")
-    digest = hashlib.sha256()
-    for path in wheels:
-        digest.update(path.name.encode())
-        digest.update(path.read_bytes())
-    destination = Path(tempfile.gettempdir()) / "yugo_node_mujoco" / digest.hexdigest()[:20]
-    marker = destination / ".complete"
-    if not marker.is_file():
-        destination.mkdir(parents=True, exist_ok=True)
-        for path in wheels:
-            if path.name.startswith("numpy-"):
-                continue
-            with zipfile.ZipFile(path) as archive:
-                # Only local packaged wheels are used; verify paths before
-                # extraction rather than accepting paths outside the cache.
-                root = destination.resolve()
-                for member in archive.namelist():
-                    target = (destination / member).resolve()
-                    if not target.is_relative_to(root):
-                        raise RuntimeError("MuJoCo wheel contains an invalid path")
-                archive.extractall(destination)
-        marker.write_text("Official MuJoCo wheel runtime\n", encoding="utf-8")
+    destination = _cache_wheels(_selected_wheels(wheel_dir))
     location = str(destination)
     if location not in sys.path:
         sys.path.append(location)
     importlib.invalidate_caches()
     try:
-        engine = importlib.import_module("mujoco")
+        engine = _import_mujoco()
         _check_version(engine)
         _host_allocator(engine)
     except (ImportError, OSError) as error:
@@ -130,7 +293,7 @@ def _check_version(engine):
         missing.append('MjModel.from_xml_string')
     if getattr(getattr(engine, 'mjtObj', None), 'mjOBJ_BODY', None) is None:
         missing.append('mjtObj.mjOBJ_BODY')
-    if sys.platform == 'win32' and 'bpy' in sys.modules:
+    if sys.platform in {'win32', 'linux'} and 'bpy' in sys.modules:
         missing.extend(name for name in ('get_mju_user_malloc', 'get_mju_user_free',
                                          'set_mju_user_malloc', 'set_mju_user_free')
                        if not callable(getattr(engine, name, None)))

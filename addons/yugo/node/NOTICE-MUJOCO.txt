@@ -9,9 +9,45 @@ See LICENSE-MUJOCO.txt for the complete license.
 Official source: https://github.com/google-deepmind/mujoco
 Pinned release: https://github.com/google-deepmind/mujoco/releases/tag/3.3.7
 Python distribution: https://pypi.org/project/mujoco/3.3.7/
-Bundled engine: mujoco-3.3.7-cp313-cp313-win_amd64.whl
-SHA-256: 11f3f6154aa7f72f5929f150800c7098904f91eb0b7cdefacb6fdf7edd3704f8
-Target: CPython 3.13, Windows x86-64, Blender 5.1 / 5.2.
+Target: CPython 3.13, Blender 5.1 / 5.2; Windows x86-64, Linux x86-64,
+and Apple Silicon macOS. Intel macOS is not a supported Blender 5.1 host.
+MuJoCo x86-64 builds require AVX; its Linux wheel requires glibc 2.27+.
+Blender's own operating-system/hardware requirements also apply.
+
+Original engine wheels, verified against official PyPI metadata:
+https://pypi.org/pypi/mujoco/3.3.7/json
+
+mujoco-3.3.7-cp313-cp313-win_amd64.whl
+  5,366,053 bytes
+  SHA-256: 11f3f6154aa7f72f5929f150800c7098904f91eb0b7cdefacb6fdf7edd3704f8
+mujoco-3.3.7-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  6,853,525 bytes
+  SHA-256: 1657312f4f4591ade7c7a21187065e3ab16e6a45d9c8c6abe8772fdc4b585789
+mujoco-3.3.7-cp313-cp313-macosx_11_0_arm64.whl
+  6,583,209 bytes
+  SHA-256: cc640062891fb54f1f1606bb5748b239f1616de38487c777f09d1775ccdcacc3
+
+Original GLFW 2.10.2 wheels (Python bindings with bundled GLFW 3.4):
+Official source: https://github.com/FlorianRhiem/pyGLFW/tree/v2.10.2
+Distribution metadata: https://pypi.org/pypi/glfw/2.10.2/json
+
+glfw-2.10.2-py2.py3-none-win_amd64.whl
+  564,433 bytes
+  SHA-256: 15fd0666cd8f1b0ecb535c3abb712b8ddda053bf8d16de2353b1c6ced0e65402
+glfw-2.10.2-py2.py3-none-manylinux2014_x86_64.whl
+  246,951 bytes
+  SHA-256: 82daf1f87b2a48815637dc6f6720d4a55a57ba1d3683322dc20dc28065754f97
+glfw-2.10.2-py2.py3-none-macosx_11_0_arm64.whl
+  107,146 bytes
+  SHA-256: c000b8a5e5fb4374b2c18d12347255ccb92001b9bcf80ef74c56072acbb98fe3
+
+Linux GLFW bundles both X11 and Wayland libraries. The source loader extracts
+only this host's engine and GLFW wheels plus the six pure Python dependencies;
+it keeps Blender's NumPy. Inside Blender, the Linux default GLFW import selects
+the library beside its resolved Python package, honors explicit PYGLFW_LIBRARY
+and PYGLFW_LIBRARY_VARIANT settings, and restores its temporary environment
+setting. It does not change MUJOCO_GL or disable rendering for other consumers.
+Yugo uses CPU simulation, without creating a MuJoCo window or render context.
 
 The official wheels retain their original component licenses and notices.
 This attribution does not replace those license texts. Blender's NumPy is
