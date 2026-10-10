@@ -120,4 +120,3 @@ The original Physics Lab transition limits still apply: manual setup of old
 scenes, re-enable Tracker after a host reload, and manually start its worker
 after loading a file. Its bridge is private; this release does not claim a
 Studio public feature adapter.
-
