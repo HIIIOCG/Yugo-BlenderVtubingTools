@@ -1,4 +1,4 @@
-# Yugo 0.2.0
+# Yugo 0.2.1
 
 ## Integrated Yugo Node
 
@@ -9,7 +9,7 @@ lets you create/select a graph and open its editor. The original Motion Layers,
 camera, keyboard and other legacy tools remain available in the same tab.
 
 Node Editor Composer controls use the original Yugo Avatar List and Scene Main
-FX settings. Composing, MToon Optimize and Outline continue to use the original
+FX settings. Compositing, MToon Optimize and Outline continue to use the original
 `preset.blend`; Node UI templates live in a separate library containing only
 their additional assets. Existing graph/node/socket/operator identifiers are
 preserved. Features marked unavailable by DEV 0.10.0 retain that behavior.
@@ -20,7 +20,16 @@ The bundled MuJoCo runtime requires Windows x64 and Blender 5.1/5.2. Disable
 any separately installed Yugo Node or Yugu Node Studio before enabling this
 integrated package; the packages share graph identifiers and cannot both own
 them. Download the integrated package from the
-[Yugo 0.2.0 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.0).
+[Yugo 0.2.1 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.1).
+
+Follow the [Yugo Handbook and Getting Started guide](https://hiiiodigital.com/Yugo-Docs/)
+for installation, creating a graph, and connecting tracking to a character.
+
+The optional ProtoMotions / PhysX Tracker 0.4.0 replaces the standalone Physics
+Lab. Its separate `yugo_physx_tracker-0.4.0.zip` is included in this release;
+install it alongside Yugo when you need the learned motion tracker. Existing
+Physics Lab scenes are not converted automatically. See the
+[PhysX Tracker guide](../../docs/features/PHYSX_TRACKER.md).
 
 ## Legacy functionality
 
@@ -30,14 +39,14 @@ multiple VRM avatars. Bone motion is converted to quaternions and combined from
 lower to higher priority with Replace, Layer Weight, Solo, and per-region
 Humanoid Mask controls.
 
-The integrated Composing panel installs the bundled MainFX frames from the
+The integrated Compositing panel installs the bundled MainFX frames from the
 combined `preset.blend` into the active Scene compositor. Enabling
 YugoComp targets Cryptomatte to every Mesh driven by the Avatar List's active
 VRM armature, enables the required Object, Material, Ambient Occlusion, and
 Depth passes, and exposes Scene Color Blend, Ambient Occlusion, Rim Light,
 Separated Rim, Secondary Shadow, Separated Shadows, Gradient Color, Dark Bloom,
 and Light Bloom controls. Parameter edits update only their matching nodes.
-For performance, every Avatar shares one Scene-level set of Composing parameters
+For performance, every Avatar shares one Scene-level set of Compositing parameters
 and MainFX nodes. The first enabled Avatar initializes those values from the
 preset once. Later Avatar toggles only add or remove their bound Mesh names from
 the shared Cryptomatte matte ID.
@@ -55,7 +64,7 @@ The Source Type menu is one flat list. Rokoko, Leap Motion, MeddiaPipe,
 SteamVR, and Mocopi appear at the same level as implemented sources, but remain
 disabled until their integrations are available.
 
-Composing, MToon Optimize, and shared visual assets use the single bundled
+Compositing, MToon Optimize, and shared visual assets use the single bundled
 `preset.blend` file.
 
 The Optimize button below VRM Armature opens a selected-object summary and
@@ -186,7 +195,7 @@ Extension should be disabled or uninstalled after upgrading.
 
 ## Install
 
-1. Download `yugo-0.2.0.zip` from the GitHub release.
+1. Download `yugo-0.2.1.zip` from the GitHub release.
 2. In Blender 5.1 or 5.2 on Windows x64, open **Edit > Preferences > Extensions**.
 3. Open the menu in the upper-right corner and choose **Install from Disk**.
 4. Select the downloaded ZIP and enable Yugo if needed.

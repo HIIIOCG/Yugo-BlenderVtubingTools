@@ -375,7 +375,7 @@ class YUGO_COMPOSING_PT_main(bpy.types.Panel):
     bl_order = 1000
 
     def draw_header(self, _context):
-        self.layout.label(text="Composing", icon="NODE_COMPOSITING")
+        self.layout.label(text="Compositing", icon="NODE_COMPOSITING")
 
     def draw(self, context):
         settings = _settings(context.scene)
@@ -383,7 +383,7 @@ class YUGO_COMPOSING_PT_main(bpy.types.Panel):
             text="For performance, all characters share",
             icon="INFO",
         )
-        self.layout.label(text="the same Composing data.")
+        self.layout.label(text="the same Compositing data.")
         avatar = active_avatar(context.scene)
         if avatar is None:
             disabled = self.layout.row()
