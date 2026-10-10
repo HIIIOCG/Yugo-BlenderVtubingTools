@@ -98,8 +98,14 @@ def main():
                   'source_files_sha256': {name: sha256(path) for name, path in sorted(files.items())},
                   'byte_comparison': 'passed', 'build_only': args.build_only,
                   'runtime_status': 'not_run' if args.build_only else 'passed',
-                  'source_dirty': bool(subprocess.check_output(
-                      ['git', '-C', str(ROOT), 'status', '--porcelain'], text=True).strip()),
+                  # CI's Blender setup downloads archives outside the add-on.
+                  # Reject every tracked change plus untracked add-on sources.
+                  'source_dirty': any(subprocess.check_output(
+                      ['git', '-C', str(ROOT), 'status', '--porcelain', *arguments],
+                      text=True).strip() for arguments in (
+                          ['--untracked-files=no'],
+                          ['--untracked-files=all', '--', 'addons/yugo'])),
+                  'source_clean_scope': 'all tracked files and untracked addons/yugo files',
                   'steps': steps}
         (folder / 'result.json').write_text(json.dumps(record, indent=2) + '\n')
         if args.build_only:
