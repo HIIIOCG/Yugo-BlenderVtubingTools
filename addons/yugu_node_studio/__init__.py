@@ -85,6 +85,12 @@ def register():
     global _registered
     if _registered:
         return
+    owner = bpy.types.NodeTree.bl_rna_get_subclass_py(nodes.YUGUS_NT_humanoid_motion.bl_idname, None)
+    if owner is not None and owner is not nodes.YUGUS_NT_humanoid_motion:
+        raise RuntimeError(
+            "Another Yugo Node add-on is enabled. Disable it before enabling "
+            "Yugu Node Studio."
+        )
     for cls in nodes.CLASSES:
         bpy.utils.register_class(cls)
     targets.register()

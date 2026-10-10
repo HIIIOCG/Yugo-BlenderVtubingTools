@@ -1,5 +1,28 @@
 # Yugo 0.1.26
 
+## Integrated Yugo Node
+
+This source candidate includes the complete current Yugo Node 0.10.0 runtime
+from the DEV repository under `node/`. Install one Yugo package and use the
+**Yugo** sidebar tab in both the 3D View and Node Editor. The **Yugo Node** panel
+lets you create/select a graph and open its editor. The original Motion Layers,
+camera, keyboard and other legacy tools remain available in the same tab.
+
+Node Editor Composer controls use the original Yugo Avatar List and Scene Main
+FX settings. Composing, MToon Optimize and Outline continue to use the original
+`preset.blend`; Node UI templates live in a separate library containing only
+their additional assets. Existing graph/node/socket/operator identifiers are
+preserved. Features marked unavailable by DEV 0.10.0 retain that behavior.
+See [Node functionality](node/README.md) and the
+[source and validation record](../../docs/development/YUGO_NODE_FUSION.md).
+
+The bundled MuJoCo runtime requires Windows x64 and Blender 5.1/5.2. Disable
+any separately installed Yugo Node or Yugu Node Studio before enabling this
+integrated package; the packages share graph identifiers and cannot both own
+them. This is a local integration candidate, not a new published release.
+
+## Legacy functionality
+
 Yugo targets Blender 5.1. Motion Layers combine VMC/OSC, iFacialMocap,
 Blender Action, keyboard expression, and VRM Spring Bone sources across
 multiple VRM avatars. Bone motion is converted to quaternions and combined from

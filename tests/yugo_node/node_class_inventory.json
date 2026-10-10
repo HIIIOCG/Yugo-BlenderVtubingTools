@@ -1,0 +1,490 @@
+{
+  "source": "Yugo-BlenderVtubing-Dev/addons/yugo_node",
+  "version": "0.10.0",
+  "classes": [
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NS_chat_data"
+    },
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NS_text"
+    },
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NS_chat_api_key"
+    },
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NODE_yt_chat_source"
+    },
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NODE_yt_chat_event"
+    },
+    {
+      "module": "chat_nodes",
+      "class": "YUGUS_NODE_chat_debug"
+    },
+    {
+      "module": "chat_ui_nodes",
+      "class": "YUGUS_NS_object"
+    },
+    {
+      "module": "chat_ui_nodes",
+      "class": "YUGUS_NS_collection"
+    },
+    {
+      "module": "chat_ui_nodes",
+      "class": "YUGUS_NODE_object_value"
+    },
+    {
+      "module": "chat_ui_nodes",
+      "class": "YUGUS_NODE_collection_value"
+    },
+    {
+      "module": "chat_ui_nodes",
+      "class": "YUGUS_NODE_chat_list"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NS_update_event"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NS_bone_transform"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NS_shape_values"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_hz_trigger"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_button_trigger"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_motion_to_transform"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_bone_transform_mix"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_expression_to_shapes"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_apply_transform"
+    },
+    {
+      "module": "flow",
+      "class": "YUGUS_NODE_apply_shapes"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_if"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_gate"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_delay"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_wait_until"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_once"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_sequence"
+    },
+    {
+      "module": "flow_nodes",
+      "class": "YUGUS_NODE_flow_every_n"
+    },
+    {
+      "module": "image_nodes",
+      "class": "YUGUS_NS_image"
+    },
+    {
+      "module": "image_nodes",
+      "class": "YUGUS_NODE_image_value"
+    },
+    {
+      "module": "image_nodes",
+      "class": "YUGUS_NODE_image_from_url"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NS_keyboard_data"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NS_input_state"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NS_control_mode"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_keyboard_data"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_key_state"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_state_logic"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_state_events"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_state_toggle"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_state_value"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_control_mode"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_mode_match"
+    },
+    {
+      "module": "input_nodes",
+      "class": "YUGUS_NODE_set_mode"
+    },
+    {
+      "module": "keyword_nodes",
+      "class": "YUGUS_NODE_keyword_match"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NS_vector3"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_float_value"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_math"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_clamp"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_map_range"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_float_mix"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_vector_value"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_combine_xyz"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_separate_xyz"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_vector_math"
+    },
+    {
+      "module": "math_nodes",
+      "class": "YUGUS_NODE_vector_mix"
+    },
+    {
+      "module": "mixer",
+      "class": "YUGUS_NODE_mixer"
+    },
+    {
+      "module": "motion_delay",
+      "class": "YUGUS_NODE_motion_delay"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NT_humanoid_motion"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_humanoid_motion"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_humanoid_mask"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_trigger"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_expressions"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_native_pose"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_native_expressions"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_bone_map"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_expression_map"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_spring_data"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_simulation_data"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NS_meta"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_vrm_data"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_bone_map_value"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_bone_map_mix"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_meta_value"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_map_value"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_map_mix"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_vmc_source"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_ifacial_source"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_action_source"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_key_bind"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_keybind_expression"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_action"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_head_profile"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_humanoid_mask"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_motion_smooth"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_mirror_motion"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_motion_weight"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_motion_mix"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_humanoid_retarget"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_mask"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_smooth"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_weight"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_mix"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_lock"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_expression_bind"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_spring_simulation"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_blender_output"
+    },
+    {
+      "module": "nodes",
+      "class": "YUGUS_NODE_data_viewer"
+    },
+    {
+      "module": "object_transforms",
+      "class": "YUGUS_NS_object_transforms"
+    },
+    {
+      "module": "object_transforms",
+      "class": "YUGUS_NODE_apply_object_transform"
+    },
+    {
+      "module": "physics",
+      "class": "YUGUS_NS_physics_description"
+    },
+    {
+      "module": "physics",
+      "class": "YUGUS_NODE_rigid_to_physics"
+    },
+    {
+      "module": "physics",
+      "class": "YUGUS_NODE_spring_to_physics"
+    },
+    {
+      "module": "physics",
+      "class": "YUGUS_NODE_physics_solver"
+    },
+    {
+      "module": "targets",
+      "class": "YUGUS_NS_armatures"
+    },
+    {
+      "module": "targets",
+      "class": "YUGUS_NS_objects"
+    },
+    {
+      "module": "targets",
+      "class": "YUGUS_NODE_armature_value"
+    },
+    {
+      "module": "targets",
+      "class": "YUGUS_NODE_objects_value"
+    },
+    {
+      "module": "value_nodes",
+      "class": "YUGUS_NS_float"
+    },
+    {
+      "module": "value_nodes",
+      "class": "YUGUS_NODE_string_value"
+    },
+    {
+      "module": "value_nodes",
+      "class": "YUGUS_NODE_string_to_value"
+    },
+    {
+      "module": "value_nodes",
+      "class": "YUGUS_NODE_value_to_string"
+    },
+    {
+      "module": "value_nodes",
+      "class": "YUGUS_NODE_float_receiver"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_action_flow"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_flow_entry"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_flow_end"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_wait_action"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_test_action"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_flow_parallel"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_flow_wait_all"
+    },
+    {
+      "module": "workflow_nodes",
+      "class": "YUGUS_NODE_flow_repeat"
+    },
+    {
+      "module": "workflow_ui",
+      "class": "YUGUS_NODE_test_event"
+    }
+  ]
+}

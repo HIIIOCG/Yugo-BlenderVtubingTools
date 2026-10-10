@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 id = "yugo"
 version = "0.1.26"
 name = "Yugo"
-tagline = "Layered motion, camera control, and compositing for VRM avatars"
+tagline = "Avatar motion layers, nodes, physics, camera and compositing"
 maintainer = "Yugo Contributors"
 type = "add-on"
 
@@ -12,9 +12,21 @@ license = [
 ]
 
 tags = ["Animation", "Rigging"]
+platforms = ["windows-x64"]
+wheels = [
+  "./node/wheels/mujoco-3.3.7-cp313-cp313-win_amd64.whl",
+  "./node/wheels/absl_py-2.5.0-py3-none-any.whl",
+  "./node/wheels/etils-1.14.0-py3-none-any.whl",
+  "./node/wheels/fsspec-2026.9.0-py3-none-any.whl",
+  "./node/wheels/glfw-2.10.2-py2.py3-none-win_amd64.whl",
+  "./node/wheels/pyopengl-3.1.10-py3-none-any.whl",
+  "./node/wheels/typing_extensions-4.16.0-py3-none-any.whl",
+  "./node/wheels/zipp-4.1.1-py3-none-any.whl",
+]
 
 [permissions]
-network = "Receive VMC and iFacialMocap motion data"
+network = "Receive motion/chat data and download chat avatar images"
+files = "Export Spring simulation comparison recordings as JSON"
 
 [build]
 paths_exclude_pattern = [

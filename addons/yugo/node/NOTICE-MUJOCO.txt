@@ -1,0 +1,27 @@
+MuJoCo runtime for Yugo Node 0.10.0
+=================================
+
+MuJoCo 3.3.7 and its official Python bindings
+Copyright 2022 DeepMind Technologies Limited
+License: Apache License, Version 2.0 (Apache-2.0)
+See LICENSE-MUJOCO.txt for the complete license.
+
+Official source: https://github.com/google-deepmind/mujoco
+Pinned release: https://github.com/google-deepmind/mujoco/releases/tag/3.3.7
+Python distribution: https://pypi.org/project/mujoco/3.3.7/
+Bundled engine: mujoco-3.3.7-cp313-cp313-win_amd64.whl
+SHA-256: 11f3f6154aa7f72f5929f150800c7098904f91eb0b7cdefacb6fdf7edd3704f8
+Target: CPython 3.13, Windows x86-64, Blender 5.1 / 5.2.
+
+The official wheels retain their original component licenses and notices.
+This attribution does not replace those license texts. Blender's NumPy is
+used without replacing it. The Windows adapter retains the upstream engine
+and uses official paired allocation callbacks with 64-byte-aligned UCRT
+allocation when the Blender host requires it.
+
+Yugo generates MJCF from explicitly selected rigid bodies and VRM Spring Data.
+No humanoid template, learned controller or model asset is included here.
+MuJoCo and its Python bindings are not an officially supported Google product.
+
+Yugo Node can also reuse an already-loaded compatible official CPU MuJoCo
+3.5.0 runtime. That runtime is not bundled in this archive.

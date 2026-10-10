@@ -107,6 +107,14 @@ MAINFX_BINDINGS = (
 _SYNCING_FROM_NODES = False
 
 
+def _read_composing_key(owner, key, default=None):
+    # Read the DEV spelling without rewriting saved metadata. After an explicit
+    # rebuild, the newly written Yugo generation takes precedence.
+    if key in owner:
+        return owner[key]
+    return owner.get(key.replace("yugo_", "yugus_", 1), default)
+
+
 def _preset_path() -> Path:
     return Path(__file__).resolve().parent.parent / "preset.blend"
 
@@ -325,7 +333,8 @@ def _remove_nodes(tree, nodes) -> None:
 
 
 def _layout_offset(target_tree, source_nodes) -> tuple[float, float]:
-    old_nodes = [node for node in target_tree.nodes if NODE_GENERATION_KEY in node]
+    old_nodes = [node for node in target_tree.nodes
+                 if _read_composing_key(node, NODE_GENERATION_KEY) is not None]
     ignored = {node.as_pointer() for node in old_nodes}
     remaining = [
         node for node in target_tree.nodes if node.as_pointer() not in ignored
@@ -369,7 +378,7 @@ def _find_or_create_viewer(tree, group_output):
             node
             for node in tree.nodes
             if node.bl_idname == "CompositorNodeViewer"
-            and bool(node.get(VIEWER_NODE_KEY, False))
+            and bool(_read_composing_key(node, VIEWER_NODE_KEY, False))
         ),
         None,
     )
@@ -550,8 +559,8 @@ def _clone_mainfx(scene, source_tree) -> str:
         old_nodes = [
             node
             for node in target_tree.nodes
-            if NODE_GENERATION_KEY in node
-            and node.get(NODE_GENERATION_KEY) != generation
+            if _read_composing_key(node, NODE_GENERATION_KEY) is not None
+            and _read_composing_key(node, NODE_GENERATION_KEY) != generation
         ]
         _remove_nodes(target_tree, old_nodes)
         target_tree[ACTIVE_GENERATION_KEY] = generation
@@ -566,11 +575,11 @@ def _active_mainfx_nodes(scene):
     tree = _scene_compositor_tree(scene)
     if tree is None:
         return ()
-    generation = tree.get(ACTIVE_GENERATION_KEY, "")
+    generation = _read_composing_key(tree, ACTIVE_GENERATION_KEY, "")
     return tuple(
         node
         for node in tree.nodes
-        if generation and node.get(NODE_GENERATION_KEY) == generation
+        if generation and _read_composing_key(node, NODE_GENERATION_KEY) == generation
     )
 
 
