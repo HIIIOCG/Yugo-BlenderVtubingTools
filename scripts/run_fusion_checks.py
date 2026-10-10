@@ -40,6 +40,7 @@ CHECKS = {
     "object_optimize": ("legacy", "YUGO_OBJECT_OPTIMIZE_TEST_OK"),
     "vmc_hidden_armature": ("legacy", "YUGO_VMC_HIDDEN_ARMATURE_TEST_OK"),
     "vmc_stale_layer": ("legacy", "YUGO_VMC_STALE_LAYER_SAFE_OK"),
+    "onboarding": ("fusion", "YUGO_ONBOARDING_OK"),
 }
 DEFAULT = tuple(list(CHECKS)[:14])
 
@@ -82,7 +83,28 @@ def verify_artifact(package, output):
     return result
 
 
-def run_check(binary, package, mode, name, folder, timeout):
+def provision_vrm(source, folder, environment):
+    """Copy an explicitly supplied official extension into this test's profile."""
+    files = {path.relative_to(source).as_posix(): path for path in source.rglob("*")
+             if path.is_file() and "__pycache__" not in path.relative_to(source).parts
+             and path.suffix not in {".pyc", ".pyo"}}
+    hashes = {name: digest(path) for name, path in sorted(files.items())}
+    destination = Path(environment["BLENDER_USER_EXTENSIONS"]) / "blender_org/vrm"
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+    assert all(digest(destination / name) == checksum for name, checksum in hashes.items()), "VRM fixture copy changed bytes"
+    manifest = tomllib.loads((destination / "blender_manifest.toml").read_text(encoding="utf-8"))
+    record = {"source": str(source), "copy": str(destination), "version": manifest["version"],
+              "manifest_sha256": hashes["blender_manifest.toml"], "files": len(hashes),
+              "tree_sha256": hashlib.sha256("".join(name + "\t" + checksum + "\n" for name, checksum in hashes.items()).encode()).hexdigest(),
+              "source_files_sha256": hashes}
+    record_path = folder / "vrm-fixture.json"
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    environment["FUSION_TEST_VRM_SOURCE"] = str(destination)
+    environment["FUSION_TEST_VRM_RECORD"] = str(record_path)
+    return record
+
+
+def run_check(binary, package, mode, name, folder, timeout, vrm_source=None):
     kind, marker = CHECKS[name]
     folder.mkdir(parents=True)
     snapshot = folder / "test-snapshot"
@@ -95,6 +117,9 @@ def run_check(binary, package, mode, name, folder, timeout):
     environment = isolated_environment(folder)
     environment["FUSION_TEST_REPOSITORY"] = str(ROOT)
     environment["FUSION_TEST_OUTPUT"] = str(folder / "output")
+    environment.pop("FUSION_TEST_VRM_SOURCE", None)
+    environment.pop("FUSION_TEST_VRM_RECORD", None)
+    vrm_fixture = provision_vrm(vrm_source, folder, environment) if vrm_source and name == "onboarding" else None
     if mode == "package":
         environment["FUSION_TEST_PACKAGE"] = str(package)
     else:
@@ -111,6 +136,8 @@ def run_check(binary, package, mode, name, folder, timeout):
               "bootstrap_sha256": digest(snapshot / "_bootstrap.py"),
               "class_inventory_sha256": digest(snapshot / "node_class_inventory.json"),
               "log": str(folder / "test.log")}
+    if name == "onboarding":
+        record["official_vrm"] = vrm_fixture or {"status": "not_provisioned", "reason": "Optional real VRM schema supplement requires --vrm-source"}
     options = {}
     if os.name == "nt":
         startup = subprocess.STARTUPINFO()
@@ -127,6 +154,9 @@ def run_check(binary, package, mode, name, folder, timeout):
                   and "Traceback (most recent call last):" not in log)
         if kind == "fusion":
             passed = passed and "FUSION_NODE_SOURCE_OK:" in log
+        if vrm_fixture:
+            passed = passed and "ONBOARDING_OFFICIAL_VRM_OK:" in log
+            record["official_vrm"]["status"] = "passed" if passed else "failed"
         record.update(status="passed" if passed else "failed", returncode=process.returncode)
         if not passed:
             record["reason"] = "Nonzero exit, traceback, missing source assertion or completion marker"
@@ -153,17 +183,26 @@ def main():
     parser.add_argument("--test", action="append", choices=tuple(CHECKS), help="Select checks; repeat as needed")
     parser.add_argument("--mode", action="append", choices=("source", "package"))
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--vrm-source", type=Path, help="Optional absolute official VRM extension source directory; copied only for onboarding schema checks")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
     if args.list:
         for name, (kind, _marker) in CHECKS.items():
-            print(f"{name}: {kind}; {'default' if name in DEFAULT else 'optional'}; native/synthetic data")
+            materials = "native core; optional official VRM supplement (--vrm-source)" if name == "onboarding" else "native/synthetic data"
+            print(f"{name}: {kind}; {'default' if name in DEFAULT else 'optional'}; {materials}")
         return 0
     if args.blender is None or not args.blender.is_absolute() or not args.blender.is_file():
         parser.error("--blender must name an existing absolute Blender executable")
     if not 0 < args.timeout < float("inf"):
         parser.error("--timeout must be a positive finite number")
     package = args.package.resolve(strict=True) if args.package else None
+    vrm_source = None
+    if args.vrm_source:
+        if not args.vrm_source.is_absolute() or not args.vrm_source.is_dir() or not (args.vrm_source / "blender_manifest.toml").is_file():
+            parser.error("--vrm-source must name an existing absolute official VRM extension source directory")
+        vrm_source = args.vrm_source.resolve(strict=True)
+        if tomllib.loads((vrm_source / "blender_manifest.toml").read_text(encoding="utf-8")).get("id") != "vrm":
+            parser.error("--vrm-source must be the official vrm package")
     modes = list(dict.fromkeys(args.mode or (["source", "package"] if package else ["source"])))
     if "package" in modes and package is None:
         parser.error("--mode package requires --package")
@@ -185,7 +224,7 @@ def main():
         return 1
     for mode in modes:
         for name in dict.fromkeys(args.test or DEFAULT):
-            record = run_check(binary, package, mode, name, output / mode / name, args.timeout)
+            record = run_check(binary, package, mode, name, output / mode / name, args.timeout, vrm_source)
             report["tests"].append(record)
             report["status"] = "passed" if all(item["status"] == "passed" for item in report["tests"]) else "failed"
             (output / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

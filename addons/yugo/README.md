@@ -1,11 +1,13 @@
-# Yugo 0.2.1
+# Yugo 0.2.2
 
 ## Integrated Yugo Node
 
 This release includes the complete current Yugo Node 0.10.0 runtime
 from the DEV repository under `node/`. Install one Yugo package and use the
-**Yugo** sidebar tab in both the 3D View and Node Editor. The **Yugo Node** panel
-lets you create/select a graph and open its editor. The original Motion Layers,
+**Yugo** sidebar tab in both the 3D View and Node Editor. In the 3D View, press
+**N**, choose **Yugo**, and click **Open Yugo Node Editor** at the top of the panel.
+The **Yugo Node** panel also lets you create/select a graph. **Help** opens the
+official handbook. The original Motion Layers,
 camera, keyboard and other legacy tools remain available in the same tab.
 
 Node Editor Composer controls use the original Yugo Avatar List and Scene Main
@@ -16,14 +18,25 @@ preserved. Features marked unavailable by DEV 0.10.0 retain that behavior.
 See [Node functionality](node/README.md) and the
 [source and validation record](../../docs/development/YUGO_NODE_FUSION.md).
 
-The bundled MuJoCo runtime requires Windows x64 and Blender 5.1/5.2. Disable
-any separately installed Yugo Node or Yugu Node Studio before enabling this
-integrated package; the packages share graph identifiers and cannot both own
-them. Download the integrated package from the
-[Yugo 0.2.1 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.1).
+The bundled MuJoCo runtime requires Windows x64 and Blender 5.1/5.2. Install
+and enable **Yugo**; Yugo Node is already included. If you previously installed
+a separate **Yugo Node** or **Yugu Node Studio**, turn off that older entry in
+**Preferences → Add-ons** before enabling Yugo. New users can skip this step.
+Download the integrated package from the
+[Yugo 0.2.2 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.2).
 
 Follow the [Yugo Handbook and Getting Started guide](https://hiiiodigital.com/Yugo-Docs/)
 for installation, creating a graph, and connecting tracking to a character.
+
+For live tracking, import a VRM character first, then use **Fast Started** in
+**N → Yugo**. Choose the character, VMC body motion and/or VMC or iFacialMocap
+face capture. Confirm to create a wired graph and open the editor. Set the
+receiver details, click **Trigger** on **Connect receivers**, and use
+**Start Outputs** in the Yugo sidebar. **Pause Outputs** pauses this graph's
+character output; **Disconnect receivers** closes its tracking connections.
+The starter creates a new graph and checks the character's available mappings.
+Its settings cover supported tracking sources; camera, FX and keybind tools
+remain available in their own panels.
 
 The optional ProtoMotions / PhysX Tracker 0.4.0 replaces the standalone Physics
 Lab. Its separate `yugo_physx_tracker-0.4.0.zip` is included in this release;

@@ -25,12 +25,16 @@ Yugo is designed to grow beyond avatar control into a toolkit for live performan
 
 ## Get started
 
-Yugo 0.2.1 includes Yugo Node and the original Yugo tools in one extension.
+Yugo 0.2.2 includes Yugo Node and the original Yugo tools in one extension.
 Verified with **Blender 5.1 and 5.2**.
 
-Download [yugo-0.2.1.zip](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.1), install it in **Preferences → Get Extensions → Install from Disk**.
+Download [yugo-0.2.2.zip](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.2), install it in **Preferences → Get Extensions → Install from Disk**, and enable **Yugo**.
 
-The optional [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.1/yugo_physx_tracker-0.4.0.zip) replaces the standalone Physics Lab. Install its separate ZIP (about 242 MB) alongside Yugo.
+In the 3D View, press **N**, open the **Yugo** tab, and use **Open Yugo Node Editor** at the top. **Help** opens the handbook. Yugo Node is already included; no separate Node installation is needed.
+
+If you previously installed a separate **Yugo Node** or **Yugu Node Studio**, turn off that older entry in **Preferences → Add-ons** before enabling Yugo. New users can skip this step.
+
+The optional [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.2/yugo_physx_tracker-0.4.0.zip) replaces the standalone Physics Lab. Install its separate ZIP (about 242 MB) alongside Yugo.
 
 - [User documentation and Getting Started](https://hiiiodigital.com/Yugo-Docs/)
 - [Report an issue](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)

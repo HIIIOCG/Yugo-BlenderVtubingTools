@@ -36,7 +36,8 @@ _fast_started_armature_items = []
 def fast_started_armature_items(_self, _context):
     global _fast_started_armature_items
     armatures = sorted(
-        (obj for obj in bpy.data.objects if obj.type == "ARMATURE"),
+        (obj for obj in (_context.scene.objects if _context and _context.scene else ())
+         if obj.type == "ARMATURE"),
         key=lambda obj: obj.name.casefold(),
     )
     _fast_started_armature_items = [
@@ -51,7 +52,7 @@ def fast_started_armature_items(_self, _context):
     ]
     if not _fast_started_armature_items:
         _fast_started_armature_items = [
-            ("NONE", "No Armatures", "No armature objects are available")
+            ("__YUGO_NO_ARMATURES__", "No Armatures", "Import a character armature into this scene first")
         ]
     return _fast_started_armature_items
 
@@ -59,7 +60,8 @@ def fast_started_armature_items(_self, _context):
 class YUGO_OT_fast_started(bpy.types.Operator):
     bl_idname = "yugo.fast_started"
     bl_label = "Fast Started"
-    bl_description = "Open the quick character setup interface"
+    bl_description = "Create a paused Yugo Node starter for a character and tracking sources"
+    bl_options = {"REGISTER", "UNDO"}
 
     character: bpy.props.EnumProperty(
         name="Character",
@@ -67,7 +69,7 @@ class YUGO_OT_fast_started(bpy.types.Operator):
         items=fast_started_armature_items,
     )
     face_capture: bpy.props.EnumProperty(
-        name="Face Captures",
+        name="Face Capture",
         items=(
             ("NONE", "None", "Do not create a face capture source"),
             ("IFACIALMOCAP", "iFacialMocap", "Use iFacialMocap face capture"),
@@ -80,13 +82,8 @@ class YUGO_OT_fast_started(bpy.types.Operator):
         items=(
             ("NONE", "None", "Do not create a body motion source"),
             ("VMC", "VMC", "Use VMC body motion"),
-            ("ROKOKO", "Rokoko", "Use Rokoko body motion"),
-            ("LEAP_MOTION", "Leap Motion", "Use Leap Motion"),
-            ("MEDIAPIPE", "MediaPipe", "Use MediaPipe body motion"),
-            ("STEAMVR", "SteamVR", "Use SteamVR tracking"),
-            ("MOCOPI", "Mocopi", "Use Sony Mocopi body motion"),
         ),
-        default="NONE",
+        default="VMC",
     )
     camera: bpy.props.EnumProperty(
         name="Camera",
@@ -94,7 +91,8 @@ class YUGO_OT_fast_started(bpy.types.Operator):
             ("FOLLOW_CHARACTER", "Follow Character", "Create a character-following camera"),
             ("NONE", "None", "Do not configure a camera"),
         ),
-        default="FOLLOW_CHARACTER",
+        default="NONE",
+        options={"HIDDEN", "SKIP_SAVE"},
     )
     fx: bpy.props.EnumProperty(
         name="FX",
@@ -102,7 +100,8 @@ class YUGO_OT_fast_started(bpy.types.Operator):
             ("AUTO", "Auto", "Automatically configure character effects"),
             ("NONE", "None", "Do not configure effects"),
         ),
-        default="AUTO",
+        default="NONE",
+        options={"HIDDEN", "SKIP_SAVE"},
     )
     keybinds: bpy.props.EnumProperty(
         name="KeyBinds",
@@ -110,11 +109,20 @@ class YUGO_OT_fast_started(bpy.types.Operator):
             ("AUTO", "Auto", "Automatically configure character keybinds"),
             ("NONE", "None", "Do not configure keybinds"),
         ),
-        default="AUTO",
+        default="NONE",
+        options={"HIDDEN", "SKIP_SAVE"},
     )
 
     def invoke(self, context, _event):
-        armature = active_armature(context.scene)
+        armatures = sorted((obj for obj in context.scene.objects if obj.type == "ARMATURE"),
+                           key=lambda obj: obj.name.casefold())
+        if not armatures:
+            self.report({"WARNING"}, "Import a character armature into this scene first")
+            return {"CANCELLED"}
+        selected = context.active_object
+        armature = selected if selected is not None and selected.type == "ARMATURE" else active_armature(context.scene)
+        if armature not in armatures:
+            armature = armatures[0]
         if armature is not None:
             try:
                 self.character = armature.name
@@ -126,18 +134,53 @@ class YUGO_OT_fast_started(bpy.types.Operator):
         layout = self.layout
         sections = (
             ("01 Character", "character"),
-            ("02 Face Captures", "face_capture"),
+            ("02 Face Capture", "face_capture"),
             ("03 Body Motion", "body_motion"),
-            ("04 Camera", "camera"),
-            ("05 FX", "fx"),
-            ("06 KeyBinds", "keybinds"),
         )
         for label, property_name in sections:
             box = layout.box()
             box.label(text=label)
             box.prop(self, property_name, text="")
+        layout.label(text="Creates a new graph; receivers stay disconnected.", icon="INFO")
+        layout.label(text="Edit receiver settings, connect, then click Start Outputs.")
 
-    def execute(self, _context):
+    def execute(self, context):
+        if any(value != "NONE" for value in (self.camera, self.fx, self.keybinds)):
+            self.report({"WARNING"}, "Camera, FX and keybind setup are not supported by Fast Started")
+            return {"CANCELLED"}
+        from .quick_start import create_starter
+        try:
+            tree = create_starter(context, self.character, self.face_capture, self.body_motion)
+        except Exception as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        if context.area is not None:
+            bpy.ops.yugu_node_studio.open_editor()
+        if tree.get("yugo_onboarding_warning"):
+            self.report({"WARNING"}, tree["yugo_onboarding_warning"].replace("\n", " "))
+        self.report({"INFO"}, f'Created "{tree.name}". Set receiver details, connect, then click Start Outputs in N > Yugo.')
+        return {"FINISHED"}
+
+
+class YUGO_OT_starter_output_toggle(bpy.types.Operator):
+    bl_idname = "yugo.starter_output_toggle"
+    bl_label = "Start / Pause Outputs"
+    bl_description = "Start or pause this starter graph's output clock; connect receivers separately"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from .quick_start import context_tree, starter_clock
+        return starter_clock(context_tree(context)) is not None
+
+    def execute(self, context):
+        from .quick_start import context_tree, starter_clock
+        tree = context_tree(context)
+        clock = starter_clock(tree)
+        if clock is None:
+            return {"CANCELLED"}
+        clock.mute = not clock.mute
+        self.report({"INFO"}, "Outputs paused" if clock.mute else "Outputs started; receivers connect separately")
         return {"FINISHED"}
 
 
@@ -160,10 +203,10 @@ class YUGO_OT_setting_popup(bpy.types.Operator):
 class YUGO_OT_help_placeholder(bpy.types.Operator):
     bl_idname = "yugo.help_placeholder"
     bl_label = "Help"
-    bl_description = "Open the Yugo Handbook (coming soon)"
+    bl_description = "Open the Yugo Handbook in your web browser"
 
     def execute(self, _context):
-        return {"FINISHED"}
+        return bpy.ops.wm.url_open(url="https://hiiiodigital.com/Yugo-Docs/")
 
 
 class YUGO_OT_view_window_settings(bpy.types.Operator):
@@ -817,6 +860,7 @@ class YUGO_OT_blendshape_mask_refresh(bpy.types.Operator):
 
 CLASSES = (
     YUGO_OT_fast_started,
+    YUGO_OT_starter_output_toggle,
     YUGO_OT_setting_popup,
     YUGO_OT_help_placeholder,
     YUGO_OT_view_window_settings,
