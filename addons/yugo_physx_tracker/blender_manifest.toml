@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+id = "yugo_physx_tracker"
+version = "0.4.0"
+name = "Yugo PhysX Tracker"
+tagline = "Run the ProtoMotions learned tracker with standalone PhysX"
+maintainer = "Yugo Contributors"
+type = "add-on"
+tags = ["Animation", "Physics"]
+blender_version_min = "5.1.0"
+platforms = ["windows-x64"]
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Read motion models and write local PhysX diagnostics"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", "tests/", "reports/", ".git/"]

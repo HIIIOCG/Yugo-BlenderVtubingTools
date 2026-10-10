@@ -1,0 +1,635 @@
+# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""The ``warp`` package provides array types and functions for creating and manipulating
+multi-dimensional data on CPU and CUDA devices. It includes kernel and function decorators
+(:func:`kernel`, :func:`func`) for defining parallel code, along with a comprehensive set
+of built-in types and functions for use within kernels (see :doc:`/language_reference/builtins`).
+
+The package provides device management, kernel launch and synchronization functions, automatic
+differentiation via :class:`Tape` recording, type introspection and construction utilities, and
+module compilation and caching.
+
+Additional functionality is available in optional submodules that must be explicitly
+imported, such as :mod:`warp.render` for visualization, :mod:`warp.fem` for finite
+element methods, and :mod:`warp.sparse` for sparse linear algebra.
+"""
+
+# isort: skip_file
+
+# Top-down Warp module declarations. These map the internal `warp._src` source
+# modules to the public Warp modules their kernels/functions/structs belong to.
+# This is the single place the mapping lives, including for the optional
+# subpackages (`warp.optim`, `warp.render`, `warp.fem`). Declaring everything
+# here — rather than in each subpackage's `__init__` — guarantees a mapping is in
+# effect before its source module is imported: Python runs this `__init__` to
+# completion before any `warp._src.*` submodule can be imported, and
+# `register_module_source` imports nothing, so constructs always register under
+# their public Warp module name on first creation. Keep this block at the very
+# top, since importing `warp._src.context` below eagerly creates Warp modules.
+from warp._src.module_registry import register_module_source as _register_module_source
+
+# Keep every declaration on a single line: ``warp._src.context.export_stubs``
+# parses this file line-by-line and only skips lines starting with the call
+# below, so a formatter-wrapped (multi-line) call would leak into the generated
+# stubs. ``# fmt: off`` stops the formatter from wrapping the longer lines.
+# fmt: off
+_register_module_source("warp.autograd", "warp._src.autograd")
+_register_module_source("warp.geometry", "warp._src.geometry.delaunay")
+_register_module_source("warp.geometry.marching_cubes", "warp._src.geometry.marching_cubes")
+_register_module_source("warp.geometry.sparse_marching_cubes", "warp._src.geometry.sparse_marching_cubes")
+_register_module_source("warp.math", "warp._src.math")
+_register_module_source("warp.sparse", "warp._src.sparse")
+_register_module_source("warp.utils", "warp._src.utils")
+
+_register_module_source("warp.optim.adam", "warp._src.optim.adam")
+_register_module_source("warp.optim.linear", "warp._src.optim.linear")
+_register_module_source("warp.optim.sgd", "warp._src.optim.sgd")
+
+_register_module_source("warp.render.imgui_manager", "warp._src.render.imgui_manager")
+_register_module_source("warp.render.render_opengl", "warp._src.render.render_opengl")
+_register_module_source("warp.render.render_usd", "warp._src.render.render_usd")
+_register_module_source("warp.render.utils", "warp._src.render.utils")
+
+_register_module_source("warp.fem.adaptivity", "warp._src.fem.adaptivity")
+_register_module_source("warp.fem.cache", "warp._src.fem.cache")
+_register_module_source("warp.fem.dirichlet", "warp._src.fem.dirichlet")
+_register_module_source("warp.fem.domain", "warp._src.fem.domain")
+_register_module_source("warp.fem.field.field", "warp._src.fem.field.field")
+_register_module_source("warp.fem.field.nodal_field", "warp._src.fem.field.nodal_field")
+_register_module_source("warp.fem.field.restriction", "warp._src.fem.field.restriction")
+_register_module_source("warp.fem.field.virtual", "warp._src.fem.field.virtual")
+_register_module_source("warp.fem.geometry.adaptive_nanogrid", "warp._src.fem.geometry.adaptive_nanogrid")
+_register_module_source("warp.fem.geometry.closest_point", "warp._src.fem.geometry.closest_point")
+_register_module_source("warp.fem.geometry.deformed_geometry", "warp._src.fem.geometry.deformed_geometry")
+_register_module_source("warp.fem.geometry.element", "warp._src.fem.geometry.element")
+_register_module_source("warp.fem.geometry.geometry", "warp._src.fem.geometry.geometry")
+_register_module_source("warp.fem.geometry.grid_2d", "warp._src.fem.geometry.grid_2d")
+_register_module_source("warp.fem.geometry.grid_3d", "warp._src.fem.geometry.grid_3d")
+_register_module_source("warp.fem.geometry.hexmesh", "warp._src.fem.geometry.hexmesh")
+_register_module_source("warp.fem.geometry.nanogrid", "warp._src.fem.geometry.nanogrid")
+_register_module_source("warp.fem.geometry.partition", "warp._src.fem.geometry.partition")
+_register_module_source("warp.fem.geometry.quadmesh", "warp._src.fem.geometry.quadmesh")
+_register_module_source("warp.fem.geometry.tetmesh", "warp._src.fem.geometry.tetmesh")
+_register_module_source("warp.fem.geometry.trimesh", "warp._src.fem.geometry.trimesh")
+_register_module_source("warp.fem.integrate", "warp._src.fem.integrate")
+_register_module_source("warp.fem.linalg", "warp._src.fem.linalg")
+_register_module_source("warp.fem.operator", "warp._src.fem.operator")
+_register_module_source("warp.fem.polynomial", "warp._src.fem.polynomial")
+_register_module_source("warp.fem.quadrature.pic_quadrature", "warp._src.fem.quadrature.pic_quadrature")
+_register_module_source("warp.fem.quadrature.quadrature", "warp._src.fem.quadrature.quadrature")
+_register_module_source("warp.fem.space.basis_function_space", "warp._src.fem.space.basis_function_space")
+_register_module_source("warp.fem.space.basis_space", "warp._src.fem.space.basis_space")
+_register_module_source("warp.fem.space.dof_mapper", "warp._src.fem.space.dof_mapper")
+_register_module_source("warp.fem.space.function_space", "warp._src.fem.space.function_space")
+_register_module_source("warp.fem.space.grid_2d_function_space", "warp._src.fem.space.grid_2d_function_space")
+_register_module_source("warp.fem.space.grid_3d_function_space", "warp._src.fem.space.grid_3d_function_space")
+_register_module_source("warp.fem.space.hexmesh_function_space", "warp._src.fem.space.hexmesh_function_space")
+_register_module_source("warp.fem.space.nanogrid_function_space", "warp._src.fem.space.nanogrid_function_space")
+_register_module_source("warp.fem.space.partition", "warp._src.fem.space.partition")
+_register_module_source("warp.fem.space.quadmesh_function_space", "warp._src.fem.space.quadmesh_function_space")
+_register_module_source("warp.fem.space.restriction", "warp._src.fem.space.restriction")
+_register_module_source("warp.fem.space.shape.cube_shape_function", "warp._src.fem.space.shape.cube_shape_function")
+_register_module_source("warp.fem.space.shape.shape_function", "warp._src.fem.space.shape.shape_function")
+_register_module_source("warp.fem.space.shape.square_shape_function", "warp._src.fem.space.shape.square_shape_function")
+_register_module_source("warp.fem.space.shape.tet_shape_function", "warp._src.fem.space.shape.tet_shape_function")
+_register_module_source("warp.fem.space.shape.triangle_shape_function", "warp._src.fem.space.shape.triangle_shape_function")
+_register_module_source("warp.fem.space.tetmesh_function_space", "warp._src.fem.space.tetmesh_function_space")
+_register_module_source("warp.fem.space.topology", "warp._src.fem.space.topology")
+_register_module_source("warp.fem.space.trimesh_function_space", "warp._src.fem.space.trimesh_function_space")
+_register_module_source("warp.fem.types", "warp._src.fem.types")
+_register_module_source("warp.fem.utils", "warp._src.fem.utils")
+# fmt: on
+
+# category: Type Annotations
+
+from warp._src.types import Int as Int
+from warp._src.types import Float as Float
+from warp._src.types import Scalar as Scalar
+from warp._src.context import DeviceLike as DeviceLike
+from warp._src.types import ref as ref
+
+
+# category: Data Types > Scalars
+
+from warp._src.types import bool as bool
+from warp._src.types import int8 as int8
+from warp._src.types import uint8 as uint8
+from warp._src.types import int16 as int16
+from warp._src.types import uint16 as uint16
+from warp._src.types import int32 as int32
+from warp._src.types import uint32 as uint32
+from warp._src.types import int64 as int64
+from warp._src.types import uint64 as uint64
+from warp._src.types import handle as handle
+from warp._src.types import float16 as float16
+from warp._src.types import bfloat16 as bfloat16
+from warp._src.types import float32 as float32
+from warp._src.types import float64 as float64
+
+
+# category: Data Types > Vectors
+
+from warp._src.types import vec2 as vec2
+from warp._src.types import vec2b as vec2b
+from warp._src.types import vec2ub as vec2ub
+from warp._src.types import vec2s as vec2s
+from warp._src.types import vec2us as vec2us
+from warp._src.types import vec2i as vec2i
+from warp._src.types import vec2ui as vec2ui
+from warp._src.types import vec2l as vec2l
+from warp._src.types import vec2ul as vec2ul
+from warp._src.types import vec2h as vec2h
+from warp._src.types import vec2f as vec2f
+from warp._src.types import vec2d as vec2d
+
+from warp._src.types import vec3 as vec3
+from warp._src.types import vec3b as vec3b
+from warp._src.types import vec3ub as vec3ub
+from warp._src.types import vec3s as vec3s
+from warp._src.types import vec3us as vec3us
+from warp._src.types import vec3i as vec3i
+from warp._src.types import vec3ui as vec3ui
+from warp._src.types import vec3l as vec3l
+from warp._src.types import vec3ul as vec3ul
+from warp._src.types import vec3h as vec3h
+from warp._src.types import vec3f as vec3f
+from warp._src.types import vec3d as vec3d
+
+from warp._src.types import vec4 as vec4
+from warp._src.types import vec4b as vec4b
+from warp._src.types import vec4ub as vec4ub
+from warp._src.types import vec4s as vec4s
+from warp._src.types import vec4us as vec4us
+from warp._src.types import vec4i as vec4i
+from warp._src.types import vec4ui as vec4ui
+from warp._src.types import vec4l as vec4l
+from warp._src.types import vec4ul as vec4ul
+from warp._src.types import vec4h as vec4h
+from warp._src.types import vec4f as vec4f
+from warp._src.types import vec4d as vec4d
+
+
+# category: Data Types > Matrices
+
+from warp._src.types import mat22 as mat22
+from warp._src.types import mat22h as mat22h
+from warp._src.types import mat22f as mat22f
+from warp._src.types import mat22d as mat22d
+
+from warp._src.types import mat33 as mat33
+from warp._src.types import mat33h as mat33h
+from warp._src.types import mat33f as mat33f
+from warp._src.types import mat33d as mat33d
+
+from warp._src.types import mat44 as mat44
+from warp._src.types import mat44h as mat44h
+from warp._src.types import mat44f as mat44f
+from warp._src.types import mat44d as mat44d
+
+from warp._src.types import matrix_from_cols as matrix_from_cols
+from warp._src.types import matrix_from_rows as matrix_from_rows
+
+
+# category: Data Types > Quaternions
+
+from warp._src.types import quat as quat
+from warp._src.types import quath as quath
+from warp._src.types import quatf as quatf
+from warp._src.types import quatd as quatd
+
+
+# category: Data Types > Transformations
+
+from warp._src.types import transform as transform
+from warp._src.types import transformh as transformh
+from warp._src.types import transformf as transformf
+from warp._src.types import transformd as transformd
+
+
+# category: Data Types > Spatial Vectors and Matrices
+
+from warp._src.types import spatial_vector as spatial_vector
+from warp._src.types import spatial_vectorh as spatial_vectorh
+from warp._src.types import spatial_vectorf as spatial_vectorf
+from warp._src.types import spatial_vectord as spatial_vectord
+
+from warp._src.types import spatial_matrix as spatial_matrix
+from warp._src.types import spatial_matrixh as spatial_matrixh
+from warp._src.types import spatial_matrixf as spatial_matrixf
+from warp._src.types import spatial_matrixd as spatial_matrixd
+
+
+# category: Arrays
+
+from warp._src.types import array as array
+from warp._src.types import array1d as array1d
+from warp._src.types import array2d as array2d
+from warp._src.types import array3d as array3d
+from warp._src.types import array4d as array4d
+
+from warp._src.types import fixedarray as fixedarray
+
+from warp._src.types import tile as tile
+from warp._src.types import tile_stack as tile_stack
+
+from warp._src.types import from_ptr as from_ptr
+
+from warp._src.context import zeros as zeros
+from warp._src.context import zeros_like as zeros_like
+from warp._src.context import ones as ones
+from warp._src.context import ones_like as ones_like
+from warp._src.context import full as full
+from warp._src.context import full_like as full_like
+from warp._src.context import clone as clone
+from warp._src.context import empty as empty
+from warp._src.context import empty_like as empty_like
+from warp._src.context import copy as copy
+
+
+# category: Arrays > Indexed Arrays
+
+from warp._src.types import indexedarray as indexedarray
+from warp._src.types import indexedarray1d as indexedarray1d
+from warp._src.types import indexedarray2d as indexedarray2d
+from warp._src.types import indexedarray3d as indexedarray3d
+from warp._src.types import indexedarray4d as indexedarray4d
+
+
+# category: Spatial Acceleration
+
+from warp._src.types import Bvh as Bvh
+from warp._src.types import Mesh as Mesh
+from warp._src.types import HashGrid as HashGrid
+from warp._src.types import Volume as Volume
+from warp._src.types import BvhQuery as BvhQuery
+from warp._src.types import BvhQueryTiled as BvhQueryTiled
+from warp._src.types import HashGridQuery as HashGridQuery
+from warp._src.types import MeshQuery as MeshQuery
+from warp._src.types import MeshQueryAABB as MeshQueryAABB
+
+from warp._src.types import MeshQueryAABBTiled as MeshQueryAABBTiled
+from warp._src.types import MeshQueryPoint as MeshQueryPoint
+from warp._src.types import MeshQueryRay as MeshQueryRay
+
+
+# category: Textures
+
+from warp._src.texture import Texture as Texture
+from warp._src.texture import Texture1D as Texture1D
+from warp._src.texture import Texture2D as Texture2D
+from warp._src.texture import Texture3D as Texture3D
+from warp._src.texture import TextureResourceFlags as TextureResourceFlags
+from warp._src.texture import GLTextureResource as GLTextureResource
+from warp._src.texture import TextureFilterMode as TextureFilterMode
+from warp._src.texture import TextureAddressMode as TextureAddressMode
+
+
+# category: Runtime
+
+from warp._src.context import init as init
+
+from warp._src.context import is_cpu_available as is_cpu_available
+from warp._src.context import is_cubql_available as is_cubql_available
+from warp._src.context import is_cuda_available as is_cuda_available
+
+from warp._src.build import clear_kernel_cache as clear_kernel_cache
+from warp._src.build import clear_lto_cache as clear_lto_cache
+
+from warp._src.context import print_diagnostics as print_diagnostics
+
+
+# category: Kernel Programming
+
+from warp._src.codegen import WarpCodegenAttributeError as WarpCodegenAttributeError
+from warp._src.codegen import WarpCodegenError as WarpCodegenError
+from warp._src.codegen import WarpCodegenIndexError as WarpCodegenIndexError
+from warp._src.codegen import WarpCodegenKeyError as WarpCodegenKeyError
+from warp._src.codegen import WarpCodegenTypeError as WarpCodegenTypeError
+from warp._src.codegen import WarpCodegenValueError as WarpCodegenValueError
+from warp._src.context import func as func
+from warp._src.context import func_grad as func_grad
+from warp._src.context import func_replay as func_replay
+from warp._src.context import func_native as func_native
+from warp._src.context import grad as grad
+from warp._src.context import kernel as kernel
+from warp._src.context import struct as struct
+from warp._src.context import overload as overload
+from warp._src.types import constant as constant
+from warp._src.types import address_of as address_of
+from warp._src.utils import map as map
+from warp._src.builtins import static as static
+
+
+# category: Kernel Execution
+
+from warp._src.context import Kernel as Kernel
+from warp._src.context import Function as Function
+from warp._src.context import Launch as Launch
+from warp._src.context import Module as Module
+from warp._src.context import ModuleBuildOptions as ModuleBuildOptions
+
+from warp._src.context import launch as launch
+from warp._src.context import launch_tiled as launch_tiled
+from warp._src.context import get_cuda_kernel_properties as get_cuda_kernel_properties
+from warp._src.context import get_suggested_block_size as get_suggested_block_size
+from warp._src.context import synchronize as synchronize
+
+
+# category: Automatic Differentiation
+
+from warp._src.tape import Tape as Tape
+
+
+# category: Device Management
+
+from warp._src.context import Device as Device
+from warp._src.utils import ScopedDevice as ScopedDevice
+
+from warp._src.context import is_device_available as is_device_available
+
+from warp._src.context import get_devices as get_devices
+from warp._src.context import get_preferred_device as get_preferred_device
+from warp._src.context import get_cuda_devices as get_cuda_devices
+from warp._src.context import get_cuda_device_count as get_cuda_device_count
+from warp._src.context import get_cuda_device as get_cuda_device
+from warp._src.context import get_cuda_supported_archs as get_cuda_supported_archs
+from warp._src.context import get_cuda_toolkit_version as get_cuda_toolkit_version
+from warp._src.context import get_cuda_driver_version as get_cuda_driver_version
+
+from warp._src.context import map_cuda_device as map_cuda_device
+from warp._src.context import unmap_cuda_device as unmap_cuda_device
+
+from warp._src.context import get_device as get_device
+from warp._src.context import set_device as set_device
+from warp._src.context import can_access as can_access
+
+from warp._src.context import synchronize_device as synchronize_device
+
+
+# category: Module Management
+
+from warp._src.context import set_module_options as set_module_options
+from warp._src.context import get_module_options as get_module_options
+
+from warp._src.context import get_module as get_module
+from warp._src.context import force_load as force_load
+from warp._src.context import load_module as load_module
+
+from warp._src.context import compile_aot_module as compile_aot_module
+from warp._src.context import load_aot_module as load_aot_module
+
+
+# category: CUDA Stream Management
+
+from warp._src.context import Stream as Stream
+from warp._src.utils import ScopedStream as ScopedStream
+
+
+from warp._src.context import get_stream as get_stream
+from warp._src.context import set_stream as set_stream
+from warp._src.context import wait_stream as wait_stream
+from warp._src.context import synchronize_stream as synchronize_stream
+
+
+# category: CUDA Event Management
+
+from warp._src.context import Event as Event
+from warp._src.context import record_event as record_event
+from warp._src.context import wait_event as wait_event
+from warp._src.context import synchronize_event as synchronize_event
+from warp._src.context import get_event_elapsed_time as get_event_elapsed_time
+
+
+# category: CUDA Memory Management
+
+from warp._src.utils import ScopedMempool as ScopedMempool
+from warp._src.utils import ScopedMempoolAccess as ScopedMempoolAccess
+from warp._src.utils import ScopedPeerAccess as ScopedPeerAccess
+
+from warp._src.context import get_cuda_max_cluster_dim as get_cuda_max_cluster_dim
+from warp._src.context import is_mempool_supported as is_mempool_supported
+from warp._src.context import is_mempool_enabled as is_mempool_enabled
+from warp._src.context import set_mempool_enabled as set_mempool_enabled
+
+from warp._src.context import set_mempool_release_threshold as set_mempool_release_threshold
+from warp._src.context import get_mempool_release_threshold as get_mempool_release_threshold
+from warp._src.context import get_mempool_used_mem_current as get_mempool_used_mem_current
+from warp._src.context import get_mempool_used_mem_high as get_mempool_used_mem_high
+
+from warp._src.context import is_mempool_access_supported as is_mempool_access_supported
+from warp._src.context import is_mempool_access_enabled as is_mempool_access_enabled
+from warp._src.context import set_mempool_access_enabled as set_mempool_access_enabled
+
+from warp._src.context import is_peer_access_supported as is_peer_access_supported
+from warp._src.context import is_peer_access_enabled as is_peer_access_enabled
+from warp._src.context import set_peer_access_enabled as set_peer_access_enabled
+
+from warp._src.context import MemoryKind as MemoryKind
+from warp._src.context import Allocator as Allocator
+from warp._src.context import CudaManagedAllocator as CudaManagedAllocator
+from warp._src.context import get_device_allocator as get_device_allocator
+from warp._src.context import set_cuda_allocator as set_cuda_allocator
+from warp._src.context import set_device_allocator as set_device_allocator
+from warp._src.utils import ScopedAllocator as ScopedAllocator
+
+
+# category: Graph Management
+
+from warp._src.context import CaptureMode as CaptureMode
+from warp._src.utils import ScopedCapture as ScopedCapture
+
+from warp._src.context import is_conditional_graph_supported as is_conditional_graph_supported
+
+from warp._src.context import Graph as Graph
+from warp._src.context import capture_begin as capture_begin
+from warp._src.context import capture_end as capture_end
+from warp._src.context import capture_launch as capture_launch
+from warp._src.context import capture_save as capture_save
+from warp._src.context import capture_load as capture_load
+from warp._src.context import capture_if as capture_if
+from warp._src.context import capture_while as capture_while
+from warp._src.context import capture_debug_dot_print as capture_debug_dot_print
+
+
+# category: CUDA Interprocess Communication
+
+from warp._src.types import from_ipc_handle as from_ipc_handle
+from warp._src.context import event_from_ipc_handle as event_from_ipc_handle
+
+
+# category: Profiling
+
+from warp._src.utils import ScopedTimer as ScopedTimer
+
+from warp._src.utils import TimingResult as TimingResult
+from warp._src.utils import timing_begin as timing_begin
+from warp._src.utils import timing_end as timing_end
+from warp._src.utils import timing_print as timing_print
+
+
+from warp._src.utils import ScopedMemoryTracker as ScopedMemoryTracker
+from warp._src.context import print_memory_report as print_memory_report
+
+
+# category: Profiling > Timing Flags
+
+from warp._src.utils import TIMING_KERNEL as TIMING_KERNEL
+from warp._src.utils import TIMING_KERNEL_BUILTIN as TIMING_KERNEL_BUILTIN
+from warp._src.utils import TIMING_MEMCPY as TIMING_MEMCPY
+from warp._src.utils import TIMING_MEMSET as TIMING_MEMSET
+from warp._src.utils import TIMING_GRAPH as TIMING_GRAPH
+from warp._src.utils import TIMING_ALL as TIMING_ALL
+
+
+# category: Profiling > CUDA Profiler Control
+
+from warp._src.context import cuda_profiler_start as cuda_profiler_start
+from warp._src.context import cuda_profiler_stop as cuda_profiler_stop
+from warp._src.utils import ScopedCudaProfiler as ScopedCudaProfiler
+
+
+# category: Logging
+
+from warp._src.logger import LOG_DEBUG as LOG_DEBUG
+from warp._src.logger import LOG_INFO as LOG_INFO
+from warp._src.logger import LOG_WARNING as LOG_WARNING
+from warp._src.logger import LOG_ERROR as LOG_ERROR
+
+from warp._src.logger import Logger as Logger
+
+from warp._src.logger import set_logger as set_logger
+from warp._src.logger import get_logger as get_logger
+
+from warp._src.utils import ScopedLogger as ScopedLogger
+from warp._src.utils import ScopedLogLevel as ScopedLogLevel
+
+
+# category: NumPy Interop
+
+from warp._src.types import dtype_from_numpy as dtype_from_numpy
+from warp._src.types import dtype_to_numpy as dtype_to_numpy
+
+from warp._src.context import from_numpy as from_numpy
+
+
+# category: DLPack Interop
+
+from warp._src.dlpack import from_dlpack as from_dlpack
+from warp._src.dlpack import to_dlpack as to_dlpack
+
+
+# category: JAX Interop
+
+from warp._src.jax import from_jax as from_jax
+from warp._src.jax import to_jax as to_jax
+from warp._src.jax import dtype_from_jax as dtype_from_jax
+from warp._src.jax import dtype_to_jax as dtype_to_jax
+from warp._src.jax import device_from_jax as device_from_jax
+from warp._src.jax import device_to_jax as device_to_jax
+from warp._src.jax.ffi import JaxCallableGraphMode as JaxCallableGraphMode
+from warp._src.jax.ffi import JaxModulePreloadMode as JaxModulePreloadMode
+from warp._src.jax.ffi import clear_jax_callable_graph_cache as clear_jax_callable_graph_cache
+from warp._src.jax.ffi import jax_callable as jax_callable
+from warp._src.jax.ffi import jax_kernel as jax_kernel
+
+
+# category: PyTorch Interop
+
+from warp._src.torch import from_torch as from_torch
+from warp._src.torch import to_torch as to_torch
+from warp._src.torch import dtype_from_torch as dtype_from_torch
+from warp._src.torch import dtype_to_torch as dtype_to_torch
+from warp._src.torch import device_from_torch as device_from_torch
+from warp._src.torch import device_to_torch as device_to_torch
+from warp._src.torch import stream_from_torch as stream_from_torch
+from warp._src.torch import stream_to_torch as stream_to_torch
+
+
+# category: Omniverse Runtime Fabric Interop
+
+from warp._src.fabric import fabricarray as fabricarray
+from warp._src.fabric import fabricarrayarray as fabricarrayarray
+from warp._src.fabric import indexedfabricarray as indexedfabricarray
+from warp._src.fabric import indexedfabricarrayarray as indexedfabricarrayarray
+
+
+# category: Paddle Interop
+
+from warp._src.paddle import from_paddle as from_paddle
+from warp._src.paddle import to_paddle as to_paddle
+from warp._src.paddle import dtype_from_paddle as dtype_from_paddle
+from warp._src.paddle import dtype_to_paddle as dtype_to_paddle
+from warp._src.paddle import device_from_paddle as device_from_paddle
+from warp._src.paddle import device_to_paddle as device_to_paddle
+from warp._src.paddle import stream_from_paddle as stream_from_paddle
+
+
+# category: Data Types > Transformations
+
+from warp._src.utils import transform_expand as transform_expand
+
+
+# category: Data Types > Quaternions
+
+from warp._src.utils import quat_between_vectors as quat_between_vectors
+
+
+# category: Constants
+
+from warp._src.constants import *
+
+
+# category: Submodules
+
+from . import build_experimental as build_experimental
+from . import config as config
+from . import types as types
+from . import utils as utils
+
+
+# category: Configuration Modes
+
+from warp.config import DeterministicMode as DeterministicMode
+
+
+# category: Misc
+
+from warp._src.math import *
+
+from warp._src.context import RegisteredGLBuffer as RegisteredGLBuffer
+
+
+from typing import TYPE_CHECKING as _TYPE_CHECKING
+
+if _TYPE_CHECKING:
+    from warp._src.geometry.marching_cubes import IsoSurfaceMarchingCubes as _IsoSurfaceMarchingCubes
+
+    MarchingCubes = _IsoSurfaceMarchingCubes
+
+
+def __getattr__(name):
+    # Deprecated alias of `warp.geometry.IsoSurfaceMarchingCubes`, resolved lazily
+    # so that `wp.MarchingCubes` *is* the new class rather than a subclass of it.
+    # The isosurface API itself lives in `warp.geometry`, imported explicitly.
+    # export_stubs() omits this function's body from the generated warp/__init__.pyi
+    # (see skip_runtime_dunder_getattr there), so the TYPE_CHECKING alias above --
+    # which the stub keeps verbatim -- is what gives Pyright a concrete type for
+    # `wp.MarchingCubes` instead of falling back to treating all of `warp.*` as
+    # Unknown because of a module-level __getattr__ in the stub.
+    if name == "MarchingCubes":
+        from warp._src.geometry.marching_cubes import IsoSurfaceMarchingCubes  # noqa: PLC0415
+        from warp._src.logger import log_warning  # noqa: PLC0415
+
+        log_warning(
+            "wp.MarchingCubes is deprecated and will be removed in a future version of Warp. "
+            "Use wp.geometry.IsoSurfaceMarchingCubes instead.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        return IsoSurfaceMarchingCubes
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__version__ = config.version

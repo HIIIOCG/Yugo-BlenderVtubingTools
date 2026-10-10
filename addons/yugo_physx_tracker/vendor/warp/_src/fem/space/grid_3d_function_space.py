@@ -1,0 +1,315 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any
+
+import numpy as np
+
+import warp as wp
+from warp._src.fem import cache
+from warp._src.fem.geometry import Grid3D
+from warp._src.fem.polynomial import is_closed
+from warp._src.fem.types import ElementIndex
+
+from .shape import (
+    CubeBSplineShapeFunctions,
+    CubeShapeFunction,
+    CubeTripolynomialShapeFunctions,
+)
+from .topology import SpaceTopology, forward_base_topology
+
+
+class Grid3DSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid3D, shape: CubeShapeFunction):
+        self._shape = shape
+        self.TopologyArg = grid.SideArg
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self.element_node_index = self._make_element_node_index()
+
+    @property
+    def name(self):
+        return f"{self.geometry.name}_{self._shape.name}"
+
+    @wp.func
+    def _vertex_coords(vidx_in_cell: int):
+        x = vidx_in_cell // 4
+        y = (vidx_in_cell - 4 * x) // 2
+        z = vidx_in_cell - 4 * x - 2 * y
+        return wp.vec3i(x, y, z)
+
+    @wp.func
+    def _vertex_index(cell_arg: Any, cell_index: ElementIndex, vidx_in_cell: int):
+        res = cell_arg.res
+        strides = wp.vec2i((res[1] + 1) * (res[2] + 1), res[2] + 1)
+
+        corner = Grid3D.get_cell(res, cell_index) + Grid3DSpaceTopology._vertex_coords(vidx_in_cell)
+        return Grid3D._from_3d_index(strides, corner)
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            self.geometry._vertex_count_per_environment() * self._shape.VERTEX_NODE_COUNT
+            + self.geometry._edge_count_per_environment() * self._shape.EDGE_NODE_COUNT
+            + self.geometry._side_count_per_environment() * self._shape.FACE_NODE_COUNT
+            + self.geometry._cell_count_per_environment() * self._shape.INTERIOR_NODE_COUNT
+        )
+
+    def _make_element_node_index(self):
+        VERTEX_NODE_COUNT = self._shape.VERTEX_NODE_COUNT
+        EDGE_NODE_COUNT = self._shape.EDGE_NODE_COUNT
+        FACE_NODE_COUNT = self._shape.FACE_NODE_COUNT
+        INTERIOR_NODE_COUNT = self._shape.INTERIOR_NODE_COUNT
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            node_type, type_instance, type_index = self._shape.node_type_and_type_index(node_index_in_elt)
+
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                res = cell_arg.res
+                cell_count = Grid3D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                env_node_count = Grid3D.vertex_count_per_environment(res) * VERTEX_NODE_COUNT
+                if wp.static(EDGE_NODE_COUNT > 0):
+                    env_node_count += Grid3D.edge_count_per_environment(res) * EDGE_NODE_COUNT
+                if wp.static(FACE_NODE_COUNT > 0):
+                    env_node_count += Grid3D.side_count_per_environment(res) * FACE_NODE_COUNT
+                if wp.static(INTERIOR_NODE_COUNT > 0):
+                    env_node_count += cell_count * INTERIOR_NODE_COUNT
+                env_node_offset = env_index * env_node_count
+
+            res = cell_arg.res
+            cell = Grid3D.get_cell(res, local_element_index)
+
+            if wp.static(VERTEX_NODE_COUNT > 0):
+                if node_type == CubeShapeFunction.VERTEX:
+                    return (
+                        env_node_offset
+                        + Grid3DSpaceTopology._vertex_index(cell_arg, local_element_index, type_instance)
+                        * VERTEX_NODE_COUNT
+                        + type_index
+                    )
+
+            vertex_count = Grid3D.vertex_count_per_environment(res)
+            global_offset = vertex_count * VERTEX_NODE_COUNT
+
+            if wp.static(EDGE_NODE_COUNT > 0):
+                if node_type == CubeShapeFunction.EDGE:
+                    axis = CubeShapeFunction._edge_axis(type_instance)
+                    node_all = CubeShapeFunction._edge_coords(type_instance, type_index)
+
+                    res = cell_arg.res
+
+                    edge_index = 0
+                    if axis > 0:
+                        edge_index += (res[1] + 1) * (res[2] + 1) * res[0]
+                    if axis > 1:
+                        edge_index += (res[0] + 1) * (res[2] + 1) * res[1]
+
+                    res_loc = Grid3D._world_to_local(axis, res)
+                    cell_loc = Grid3D._world_to_local(axis, cell)
+
+                    edge_index += (res_loc[1] + 1) * (res_loc[2] + 1) * cell_loc[0]
+                    edge_index += (res_loc[2] + 1) * (cell_loc[1] + node_all[1])
+                    edge_index += cell_loc[2] + node_all[2]
+
+                    return env_node_offset + global_offset + EDGE_NODE_COUNT * edge_index + type_index
+
+                edge_count = Grid3D.edge_count_per_environment(res)
+                global_offset += edge_count * EDGE_NODE_COUNT
+
+            if wp.static(FACE_NODE_COUNT > 0):
+                if node_type == CubeShapeFunction.FACE:
+                    axis = CubeShapeFunction._face_axis(type_instance)
+                    face_offset = CubeShapeFunction._face_offset(type_instance)
+
+                    face_index = 0
+                    if axis > 0:
+                        face_index += (res[0] + 1) * res[1] * res[2]
+                    if axis > 1:
+                        face_index += (res[1] + 1) * res[2] * res[0]
+
+                    res_loc = Grid3D._world_to_local(axis, res)
+                    cell_loc = Grid3D._world_to_local(axis, cell)
+
+                    face_index += res_loc[1] * res_loc[2] * (cell_loc[0] + face_offset)
+                    face_index += res_loc[2] * cell_loc[1]
+                    face_index += cell_loc[2]
+
+                    return env_node_offset + global_offset + FACE_NODE_COUNT * face_index + type_index
+
+                face_count = Grid3D.side_count_per_environment(res)
+                global_offset += face_count * FACE_NODE_COUNT
+
+            # interior
+            return env_node_offset + global_offset + local_element_index * INTERIOR_NODE_COUNT + type_index
+
+        return element_node_index
+
+
+class GridTripolynomialSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid3D, shape: CubeTripolynomialShapeFunctions):
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self._shape = shape
+
+        self.element_node_index = self._make_element_node_index()
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            (self.geometry.res[0] * self._shape.ORDER + 1)
+            * (self.geometry.res[1] * self._shape.ORDER + 1)
+            * (self.geometry.res[2] * self._shape.ORDER + 1)
+        )
+
+    def _make_element_node_index(self):
+        ORDER = self._shape.ORDER
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            res = cell_arg.res
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                cell_count = Grid3D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                node_count = (res[0] * ORDER + 1) * (res[1] * ORDER + 1) * (res[2] * ORDER + 1)
+                env_node_offset = env_index * node_count
+
+            cell = Grid3D.get_cell(res, local_element_index)
+
+            node_i, node_j, node_k = self._shape._node_ijk(node_index_in_elt)
+
+            node_x = ORDER * cell[0] + node_i
+            node_y = ORDER * cell[1] + node_j
+            node_z = ORDER * cell[2] + node_k
+
+            node_pitch_y = (res[2] * ORDER) + 1
+            node_pitch_x = node_pitch_y * ((res[1] * ORDER) + 1)
+            node_index = node_pitch_x * node_x + node_pitch_y * node_y + node_z
+
+            return env_node_offset + node_index
+
+        return element_node_index
+
+    def node_grid(self):
+        res = self.geometry.res
+
+        cell_coords = np.array(self._shape.LOBATTO_COORDS)[:-1]
+
+        grid_coords_x = np.repeat(np.arange(0, res[0], dtype=float), len(cell_coords)) + np.tile(
+            cell_coords, reps=res[0]
+        )
+        grid_coords_x = np.append(grid_coords_x, res[0])
+        X = grid_coords_x * self.geometry.cell_size[0] + self.geometry.origin[0]
+
+        grid_coords_y = np.repeat(np.arange(0, res[1], dtype=float), len(cell_coords)) + np.tile(
+            cell_coords, reps=res[1]
+        )
+        grid_coords_y = np.append(grid_coords_y, res[1])
+        Y = grid_coords_y * self.geometry.cell_size[1] + self.geometry.origin[1]
+
+        grid_coords_z = np.repeat(np.arange(0, res[2], dtype=float), len(cell_coords)) + np.tile(
+            cell_coords, reps=res[2]
+        )
+        grid_coords_z = np.append(grid_coords_z, res[2])
+        Z = grid_coords_z * self.geometry.cell_size[2] + self.geometry.origin[2]
+
+        return np.meshgrid(X, Y, Z, indexing="ij")
+
+
+class GridBSplineSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid3D, shape: CubeBSplineShapeFunctions):
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self._shape = shape
+
+        self._padding = self._shape.PADDING
+
+        self.element_node_index = self._make_element_node_index()
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            (self.geometry.res[0] + 2 * self._padding + 1)
+            * (self.geometry.res[1] + 2 * self._padding + 1)
+            * (self.geometry.res[2] + 2 * self._padding + 1)
+        )
+
+    def _make_element_node_index(self):
+        PADDING = self._padding
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            res = cell_arg.res
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                cell_count = Grid3D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                node_count = (res[0] + 2 * PADDING + 1) * (res[1] + 2 * PADDING + 1) * (res[2] + 2 * PADDING + 1)
+                env_node_offset = env_index * node_count
+
+            cell = Grid3D.get_cell(res, local_element_index)
+
+            node_i, node_j, node_k = self._shape._node_ijk(node_index_in_elt)
+
+            node_x = cell[0] + node_i + PADDING
+            node_y = cell[1] + node_j + PADDING
+            node_z = cell[2] + node_k + PADDING
+
+            node_pitch_y = res[2] + 2 * PADDING + 1
+            node_pitch_x = node_pitch_y * (res[1] + 2 * PADDING + 1)
+            node_index = node_pitch_x * node_x + node_pitch_y * node_y + node_z
+
+            return env_node_offset + node_index
+
+        return element_node_index
+
+    def node_grid(self):
+        res = np.array(self.geometry.res) + 2 * self._padding + 1
+
+        grid_coords_x = np.arange(0, res[0], dtype=float) - self._padding
+        X = grid_coords_x * self.geometry.cell_size[0] + self.geometry.origin[0]
+
+        grid_coords_y = np.arange(0, res[1], dtype=float) - self._padding
+        Y = grid_coords_y * self.geometry.cell_size[1] + self.geometry.origin[1]
+
+        grid_coords_z = np.arange(0, res[2], dtype=float) - self._padding
+        Z = grid_coords_z * self.geometry.cell_size[2] + self.geometry.origin[2]
+
+        return np.meshgrid(X, Y, Z, indexing="ij")
+
+
+def make_grid_3d_space_topology(grid: Grid3D, shape: CubeShapeFunction):
+    if isinstance(shape, CubeTripolynomialShapeFunctions) and is_closed(shape.family):
+        return forward_base_topology(GridTripolynomialSpaceTopology, grid, shape)
+
+    if isinstance(shape, CubeBSplineShapeFunctions):
+        return forward_base_topology(GridBSplineSpaceTopology, grid, shape)
+
+    if isinstance(shape, CubeShapeFunction):
+        return forward_base_topology(Grid3DSpaceTopology, grid, shape)
+
+    raise ValueError(f"Unsupported shape function {shape.name}")

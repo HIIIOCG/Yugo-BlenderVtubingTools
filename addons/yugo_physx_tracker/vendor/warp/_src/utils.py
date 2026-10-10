@@ -1,0 +1,2426 @@
+# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import cProfile
+import gc
+import hashlib
+import operator
+import os
+import sys
+import threading
+import time
+from collections.abc import Callable
+from types import ModuleType
+from typing import Any
+
+import numpy as np
+
+import warp as wp
+import warp._src.context as context
+import warp._src.types
+from warp._src import logger as _logger_module
+from warp._src.context import Allocator, CaptureMode, DeviceLike, _validate_allocator, timing_result_t
+from warp._src.logger import Logger, LoggerBasic, _validate_logger, get_logger, log_debug, set_logger
+from warp._src.types import Array, DType, type_repr, types_equal
+
+# Cache for wp.map(): (func_name, input_descriptors, output_type_descriptor) -> (out_dtypes, kernel)
+map_cache: dict[tuple, tuple] = {}
+
+
+# expand a 7-vec to a tuple of arrays
+def transform_expand(t):
+    """Expand a flat 7-element sequence into a :class:`warp.transformf` (position + quaternion)."""
+    return wp.transform(np.array(t[0:3]), np.array(t[3:7]))
+
+
+@wp.func
+def quat_between_vectors(a: wp.vec3, b: wp.vec3) -> wp.quat:
+    """Compute the quaternion that rotates vector ``a`` to vector ``b``."""
+    a = wp.normalize(a)
+    b = wp.normalize(b)
+    c = wp.cross(a, b)
+    d = wp.dot(a, b)
+    q = wp.quat(c[0], c[1], c[2], 1.0 + d)
+    return wp.normalize(q)
+
+
+def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) -> None:
+    """Perform a scan (prefix sum) operation on an array.
+
+    This function computes the inclusive or exclusive scan of the input array and stores the result in the output array.
+    The scan operation computes a running sum of elements in the array. Vector types are scanned component-wise.
+
+    During CPU graph capture, or CUDA graph capture with ``apic=True``,
+    ``int32``, ``float32``, ``int64``, and ``float64`` scalar and vector scans
+    are recorded into the API Capture (APIC) operation stream, including
+    positively-strided (non-contiguous) 1D arrays. Non-empty,
+    negatively-strided arrays raise :exc:`NotImplementedError`; run those scans
+    outside the captured region.
+
+    Args:
+        in_array: Input array to scan. Must be a scalar or vector type with scalar type ``int32``, ``int64``,
+          ``float32``, or ``float64``.
+        out_array: Output array to store scan results. Must match input array type and size.
+        inclusive: If ``True``, performs an inclusive scan (includes current element in sum).
+          If ``False``, performs an exclusive scan (excludes current element).
+
+    Raises:
+        RuntimeError: If array storage devices don't match, if storage size is insufficient, or if data types are unsupported.
+        NotImplementedError: If called with a non-empty, negatively-strided
+          array during CPU graph capture or CUDA graph capture with
+          ``apic=True``.
+    """
+
+    if in_array.device != out_array.device:
+        raise RuntimeError(f"In and out array storage devices do not match ({in_array.device} vs {out_array.device})")
+
+    if in_array.size != out_array.size:
+        raise RuntimeError(f"In and out array storage sizes do not match ({in_array.size} vs {out_array.size})")
+
+    if not types_equal(in_array.dtype, out_array.dtype):
+        raise RuntimeError(
+            f"In and out array data types do not match ({type_repr(in_array.dtype)} vs {type_repr(out_array.dtype)})"
+        )
+
+    if in_array.size == 0:
+        return
+
+    if not in_array.is_contiguous and in_array.ndim != 1:
+        raise RuntimeError("Input array must be contiguous or one-dimensional")
+
+    if not out_array.is_contiguous and out_array.ndim != 1:
+        raise RuntimeError("Output array must be contiguous or one-dimensional")
+
+    if not (wp._src.types.type_is_scalar(in_array.dtype) or wp._src.types.type_is_vector(in_array.dtype)):
+        raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
+
+    scalar_type = wp._src.types.type_scalar_type(in_array.dtype)
+    type_length = wp._src.types.type_size(in_array.dtype)
+    dtype_size = wp._src.types.type_size_in_bytes(in_array.dtype)
+    in_stride = in_array.strides[0] if in_array.ndim == 1 and not in_array.is_contiguous else dtype_size
+    out_stride = out_array.strides[0] if out_array.ndim == 1 and not out_array.is_contiguous else dtype_size
+
+    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+
+    # array_scan is recorded into the APIC byte stream on both CPU (record-only)
+    # and CUDA (record-and-execute) captures. Track both arrays' base regions so
+    # the recorded op references real region IDs and capture_save can bind them by
+    # name. Gate on the capture device matching the array device (the capture
+    # singleton is shared across CPU and CUDA captures).
+    apic_capture = _get_apic_capture_for_device(in_array.device)
+    if apic_capture is not None:
+        if in_stride < 0 or out_stride < 0:
+            raise NotImplementedError("APIC capture does not yet support array_scan() with negative strides")
+        apic_capture.track_array(in_array)
+        apic_capture.track_array(out_array)
+
+    if in_array.device.is_cpu:
+        if scalar_type == wp.int32:
+            native_func = runtime.core.wp_array_scan_int_host
+        elif scalar_type == wp.int64:
+            native_func = runtime.core.wp_array_scan_int64_host
+        elif scalar_type == wp.float32:
+            native_func = runtime.core.wp_array_scan_float_host
+        elif scalar_type == wp.float64:
+            native_func = runtime.core.wp_array_scan_double_host
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
+    elif in_array.device.is_cuda:
+        if scalar_type == wp.int32:
+            native_func = runtime.core.wp_array_scan_int_device
+        elif scalar_type == wp.int64:
+            native_func = runtime.core.wp_array_scan_int64_device
+        elif scalar_type == wp.float32:
+            native_func = runtime.core.wp_array_scan_float_device
+        elif scalar_type == wp.float64:
+            native_func = runtime.core.wp_array_scan_double_device
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
+
+    status = native_func(in_array.ptr, out_array.ptr, in_array.size, in_stride, out_stride, type_length, inclusive)
+
+    # Only the CUDA implementations return a status.
+    if in_array.device.is_cuda and not status:
+        raise RuntimeError(runtime.get_error_string())
+
+
+def radix_sort_pairs(
+    keys: wp.array, values: wp.array, count: int, begin_bit: int = 0, end_bit: int | None = None
+) -> None:
+    """Sort key-value pairs using radix sort.
+
+    This function sorts pairs of arrays based on the keys array, maintaining the key-value
+    relationship. The sort is stable and operates in linear time.
+    The `keys` and `values` arrays must be large enough to accommodate 2*`count` elements.
+
+    Args:
+        keys: Array of keys to sort. Must be of type ``int32``, ``uint32``, ``float32``, ``int64``, ``uint64``,
+          or ``float64``.
+        values: Array of values to sort along with keys. Elements must be 4 or 8 bytes wide.
+        count: Number of elements to sort.
+        begin_bit: The least-significant key bit to start sorting from.
+        end_bit: The key bit to stop sorting at. If ``None``, sorts through the full key width.
+
+    Raises:
+        RuntimeError: If array storage devices don't match, if storage size is insufficient, or if data types are unsupported.
+    """
+    if keys.device != values.device:
+        raise RuntimeError(f"Keys and values array storage devices do not match ({keys.device} vs {values.device})")
+
+    if count == 0:
+        return
+
+    if keys.size < 2 * count or values.size < 2 * count:
+        raise RuntimeError("Keys and values array storage must be large enough to contain 2*count elements")
+
+    value_size = wp._src.types.type_size_in_bytes(values.dtype)
+    if value_size not in (4, 8):
+        raise RuntimeError(
+            f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
+        )
+
+    if not keys.is_contiguous:
+        raise RuntimeError(
+            f"radix_sort_pairs() requires a contiguous keys array, got non-contiguous keys with "
+            f"data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
+        )
+
+    if not values.is_contiguous:
+        raise RuntimeError(
+            f"radix_sort_pairs() requires a contiguous values array, got non-contiguous values with "
+            f"data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
+        )
+
+    if keys.dtype in (wp.int32, wp.uint32, wp.float32):
+        key_bit_width = 32
+    elif keys.dtype in (wp.int64, wp.uint64, wp.float64):
+        key_bit_width = 64
+    else:
+        key_bit_width = None
+
+    if key_bit_width is not None:
+        if end_bit is None:
+            end_bit = key_bit_width
+
+        if not isinstance(begin_bit, int) or not isinstance(end_bit, int):
+            raise RuntimeError("begin_bit and end_bit must be integers")
+
+        if not (0 <= begin_bit <= end_bit <= key_bit_width):
+            raise RuntimeError(f"Invalid radix sort bit range [{begin_bit}, {end_bit}) for {key_bit_width}-bit keys")
+
+    if key_bit_width is not None and begin_bit == end_bit:
+        return
+
+    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+
+    # Both CPU (record-only) and CUDA (record-and-execute) APIC captures record an
+    # APIC_OP_RADIX_SORT op. Track keys/values base regions first so the recorded
+    # op references real region IDs and capture_save can bind them by name.
+    apic_capture = _get_apic_capture_for_device(keys.device)
+    if apic_capture is not None:
+        apic_capture.track_array(keys)
+        apic_capture.track_array(values)
+
+    if keys.device.is_cpu:
+        if keys.dtype == wp.int32:
+            runtime.core.wp_radix_sort_pairs_int_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.uint32:
+            runtime.core.wp_radix_sort_pairs_uint_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.float32:
+            runtime.core.wp_radix_sort_pairs_float_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.float64:
+            runtime.core.wp_radix_sort_pairs_double_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.int64:
+            runtime.core.wp_radix_sort_pairs_int64_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.uint64:
+            runtime.core.wp_radix_sort_pairs_uint64_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        else:
+            raise RuntimeError(
+                f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
+            )
+    elif keys.device.is_cuda:
+        if keys.dtype == wp.int32:
+            runtime.core.wp_radix_sort_pairs_int_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.uint32:
+            runtime.core.wp_radix_sort_pairs_uint_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.float32:
+            runtime.core.wp_radix_sort_pairs_float_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.float64:
+            runtime.core.wp_radix_sort_pairs_double_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.int64:
+            runtime.core.wp_radix_sort_pairs_int64_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        elif keys.dtype == wp.uint64:
+            runtime.core.wp_radix_sort_pairs_uint64_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+        else:
+            raise RuntimeError(
+                f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
+            )
+
+
+def segmented_sort_pairs(
+    keys: wp.array[wp.int32] | wp.array[wp.float32],
+    values: wp.array[wp.int32],
+    count: int,
+    segment_start_indices: wp.array[wp.int32],
+    segment_end_indices: wp.array[wp.int32] | None = None,
+) -> None:
+    """Sort key-value pairs in place within each segment in ascending key order.
+
+    The sort is stable within each segment. Pairs with identical keys retain
+    their original relative order. Elements in ``keys[:count]`` and
+    ``values[:count]`` outside the segment ranges are not modified.
+
+    Segments are half-open ranges defined by ``segment_start_indices`` and
+    optionally ``segment_end_indices``. Every range must satisfy
+    ``0 <= start <= end <= count``.
+
+    During direct CPU execution, Warp raises a :class:`ValueError` for invalid
+    segment bounds. If invalid bounds are encountered during CPU graph replay,
+    :func:`warp.capture_launch` raises a :class:`RuntimeError`. For execution
+    on a CUDA device, Warp does not currently report invalid segment bounds, so
+    callers must validate segment ranges before calling this function.
+
+    All provided arrays must be contiguous and reside on the same device. The
+    segment-index arrays must be one-dimensional.
+
+    The ``keys`` and ``values`` arrays must each contain at least
+    ``2 * count`` elements. The ``keys[count:2 * count]`` and
+    ``values[count:2 * count]`` regions are scratch storage and may be
+    overwritten.
+
+    Segment ranges must not overlap one another, and neither
+    ``segment_start_indices`` nor ``segment_end_indices`` may overlap the
+    storage used by ``keys`` or ``values``. Warp does not currently detect
+    either type of overlap. Violating either restriction results in undefined
+    behavior.
+
+    Args:
+        keys: Array of keys to sort. Its dtype must be ``int32`` or ``float32``.
+        values: Array of values to reorder with their corresponding keys. Its dtype must be ``int32``.
+        count: Number of elements available to the segment ranges at the start of ``keys`` and ``values``. Must satisfy
+            ``0 <= count <= 2**31 - 1``.
+        segment_start_indices: Start index of each segment.
+            When ``segment_end_indices`` is ``None``, adjacent entries define
+            each segment, so an array of length N defines N - 1 segments.
+        segment_end_indices: End index of each segment.
+            When provided, it must have the same length as ``segment_start_indices``.
+
+    Raises:
+        TypeError: If ``count`` is not an integer.
+        ValueError: If ``count`` is outside the signed 32-bit non-negative integer range or a segment range is invalid
+            during direct CPU execution.
+        RuntimeError: If the arrays reside on different devices, ``keys`` or ``values`` has insufficient storage, an
+            array is not contiguous, a segment-index array is not one-dimensional, the segment-index arrays have
+            different lengths, or a dtype is unsupported.
+
+    Example:
+        >>> keys = wp.array([3, 1, 4, 2, 0, 0, 0, 0], dtype=wp.int32)
+        >>> values = wp.array([30, 10, 40, 20, 0, 0, 0, 0], dtype=wp.int32)
+        >>> offsets = wp.array([0, 2, 4], dtype=wp.int32)
+        >>> wp.utils.segmented_sort_pairs(keys, values, 4, offsets)
+        >>> keys.numpy()[:4].tolist()
+        [1, 3, 2, 4]
+        >>> values.numpy()[:4].tolist()
+        [10, 30, 20, 40]
+    """
+    if isinstance(count, bool):
+        raise TypeError("count must be an integer")
+
+    try:
+        count = operator.index(count)
+    except TypeError as e:
+        raise TypeError("count must be an integer") from e
+
+    if count < 0:
+        raise ValueError(f"count must be non-negative, got {count}")
+    if count > (1 << 31) - 1:
+        raise ValueError(f"count must not exceed {(1 << 31) - 1}, got {count}")
+
+    segment_devices_match = segment_start_indices.device == keys.device
+    if segment_end_indices is not None:
+        segment_devices_match = segment_devices_match and segment_end_indices.device == keys.device
+    if keys.device != values.device or not segment_devices_match:
+        raise RuntimeError("Keys, values, and segment index array storage devices must match")
+
+    if count == 0:
+        return
+
+    if keys.size < 2 * count or values.size < 2 * count:
+        raise RuntimeError("Array storage must be large enough to contain 2*count elements")
+
+    if not keys.is_contiguous:
+        raise RuntimeError("segmented_sort_pairs() requires a contiguous keys array")
+
+    if not values.is_contiguous:
+        raise RuntimeError("segmented_sort_pairs() requires a contiguous values array")
+
+    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+
+    if segment_start_indices.dtype != wp.int32:
+        raise RuntimeError("segment_start_indices array must be of type int32")
+
+    if segment_start_indices.ndim != 1:
+        raise RuntimeError("segment_start_indices must be one-dimensional")
+
+    if not segment_start_indices.is_contiguous:
+        raise RuntimeError("segmented_sort_pairs() requires a contiguous segment_start_indices array")
+
+    # Handle case where segment_end_indices is not provided
+    if segment_end_indices is None:
+        num_segments = max(0, segment_start_indices.size - 1)
+        if num_segments == 0:
+            return
+
+        segment_end_indices = segment_start_indices[1:]
+        segment_end_indices_ptr = segment_end_indices.ptr
+        segment_start_indices_ptr = segment_start_indices.ptr
+    else:
+        if segment_end_indices.dtype != wp.int32:
+            raise RuntimeError("segment_end_indices array must be of type int32")
+
+        if segment_end_indices.ndim != 1:
+            raise RuntimeError("segment_end_indices must be one-dimensional")
+
+        if not segment_end_indices.is_contiguous:
+            raise RuntimeError("segmented_sort_pairs() requires a contiguous segment_end_indices array")
+
+        if segment_start_indices.size != segment_end_indices.size:
+            raise RuntimeError(
+                "segment_start_indices and segment_end_indices must have the same size "
+                f"({segment_start_indices.size} vs {segment_end_indices.size})"
+            )
+
+        num_segments = segment_start_indices.size
+
+        segment_end_indices_ptr = segment_end_indices.ptr
+        segment_start_indices_ptr = segment_start_indices.ptr
+
+    if num_segments == 0:
+        return
+
+    # Both CPU (record-only) and CUDA (record-and-execute) APIC captures record an
+    # APIC_OP_SEGMENTED_SORT op. Track the keys/values/segment base regions first
+    # so the recorded op references real region IDs and capture_save can bind them
+    # by name (the capture singleton is shared across CPU and CUDA captures).
+    apic_capture = _get_apic_capture_for_device(keys.device)
+    if apic_capture is not None:
+        apic_capture.track_array(keys)
+        apic_capture.track_array(values)
+        apic_capture.track_array(segment_start_indices)
+        apic_capture.track_array(segment_end_indices)
+
+    if keys.device.is_cpu:
+        if keys.dtype == wp.int32 and values.dtype == wp.int32:
+            success = runtime.core.wp_segmented_sort_pairs_int_host(
+                keys.ptr,
+                values.ptr,
+                count,
+                segment_start_indices_ptr,
+                segment_end_indices_ptr,
+                num_segments,
+            )
+        elif keys.dtype == wp.float32 and values.dtype == wp.int32:
+            success = runtime.core.wp_segmented_sort_pairs_float_host(
+                keys.ptr,
+                values.ptr,
+                count,
+                segment_start_indices_ptr,
+                segment_end_indices_ptr,
+                num_segments,
+            )
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(keys.dtype)}")
+        if not success:
+            raise ValueError(runtime.get_error_string())
+    elif keys.device.is_cuda:
+        if keys.dtype == wp.int32 and values.dtype == wp.int32:
+            runtime.core.wp_segmented_sort_pairs_int_device(
+                keys.ptr,
+                values.ptr,
+                count,
+                segment_start_indices_ptr,
+                segment_end_indices_ptr,
+                num_segments,
+            )
+        elif keys.dtype == wp.float32 and values.dtype == wp.int32:
+            runtime.core.wp_segmented_sort_pairs_float_device(
+                keys.ptr,
+                values.ptr,
+                count,
+                segment_start_indices_ptr,
+                segment_end_indices_ptr,
+                num_segments,
+            )
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(keys.dtype)}")
+
+
+def runlength_encode(
+    values: wp.array,
+    run_values: wp.array,
+    run_lengths: wp.array,
+    run_count: wp.array | None = None,
+    value_count: int | None = None,
+) -> int | wp.array:
+    """Perform run-length encoding on an array.
+
+    This function compresses an array by replacing consecutive identical values with a single value
+    and its count.
+    For example, ``[1,1,1,2,2,3]`` becomes ``values=[1,2,3]`` and ``lengths=[3,2,1]``.
+
+    During CPU graph capture, or CUDA graph capture with ``apic=True``, a
+    non-empty call requires an explicit ``run_count`` array because the
+    host-return form cannot represent a replay-time result.
+
+    Args:
+        values: Input array to encode. Must be of type ``int32``.
+        run_values: Output array to store unique values. Must be at least value_count in size.
+        run_lengths: Output array to store run lengths. Must be at least value_count in size.
+        run_count: Optional output array to store the number of runs.
+          If ``None``, returns the count as an integer.
+        value_count: Number of values to process. If ``None``, processes entire array.
+
+    Returns:
+        Number of runs if ``run_count`` is ``None``, otherwise returns the ``run_count`` array.
+
+    Raises:
+        RuntimeError: If array storage devices don't match, if storage size is insufficient, if data types are
+          unsupported, or if ``value_count`` is negative.
+        NotImplementedError: If ``run_count`` is ``None`` for a non-empty call
+          during CPU graph capture or CUDA graph capture with ``apic=True``.
+    """
+    if run_values.device != values.device or run_lengths.device != values.device:
+        raise RuntimeError("run_values, run_lengths and values storage devices do not match")
+
+    if value_count is None:
+        value_count = values.size
+    elif value_count < 0:
+        raise RuntimeError(f"value_count must be non-negative, got {value_count}")
+
+    if run_values.size < value_count or run_lengths.size < value_count:
+        raise RuntimeError(f"Output array storage sizes must be at least equal to value_count ({value_count})")
+
+    if not types_equal(values.dtype, run_values.dtype):
+        raise RuntimeError(
+            f"values and run_values data types do not match ({type_repr(values.dtype)} vs {type_repr(run_values.dtype)})"
+        )
+
+    if run_lengths.dtype != wp.int32:
+        raise RuntimeError("run_lengths array must be of type int32")
+
+    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+
+    apic_capture = _get_apic_capture_for_device(values.device)
+    active_apic_capture = apic_capture is not None
+
+    # User can provide a device output array for storing the number of runs.
+    # For convenience, if no such array is provided, the number of runs is returned
+    # on host. That host-return form needs a D2H readback, which cannot be recorded
+    # into an APIC byte stream (CPU record-only or CUDA record-and-execute), so
+    # require an explicit run_count under any matching-device APIC capture.
+    if run_count is None:
+        if value_count == 0:
+            return 0
+        if active_apic_capture:
+            raise NotImplementedError("APIC capture requires runlength_encode() to receive an explicit run_count array")
+        run_count = wp.empty(shape=(1,), dtype=int, device=values.device)
+        host_return = True
+    else:
+        if run_count.device != values.device:
+            raise RuntimeError("run_count storage device does not match other arrays")
+        if run_count.dtype != wp.int32:
+            raise RuntimeError("run_count array must be of type int32")
+        if value_count == 0:
+            run_count.zero_()
+            return run_count
+        host_return = False
+
+    # Both CPU (record-only) and CUDA (record-and-execute) APIC captures record an
+    # APIC_OP_RUNLENGTH_ENCODE op. Track the base regions first so the recorded op
+    # references real region IDs and capture_save can bind them by name.
+    if active_apic_capture:
+        apic_capture.track_array(values)
+        apic_capture.track_array(run_values)
+        apic_capture.track_array(run_lengths)
+        apic_capture.track_array(run_count)
+
+    if values.device.is_cpu:
+        if values.dtype == wp.int32:
+            runtime.core.wp_runlength_encode_int_host(
+                values.ptr, run_values.ptr, run_lengths.ptr, run_count.ptr, value_count
+            )
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
+    elif values.device.is_cuda:
+        if values.dtype == wp.int32:
+            runtime.core.wp_runlength_encode_int_device(
+                values.ptr, run_values.ptr, run_lengths.ptr, run_count.ptr, value_count
+            )
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
+
+    if host_return:
+        return int(run_count.numpy()[0])
+    return run_count
+
+
+def _array_reduce_host_zero(dtype):
+    """Return the NumPy-shaped zero used by a whole-array host reduction."""
+    scalar_type = wp._src.types.type_scalar_type(dtype)
+    type_shape = getattr(dtype, "_shape_", ())
+    if not type_shape and wp._src.types.type_size(dtype) > 1:
+        type_shape = (wp._src.types.type_size(dtype),)
+    return np.zeros(type_shape, dtype=wp._src.types.dtype_to_numpy(scalar_type))[()]
+
+
+_APIC_REDUCTION_INT_MAX = (1 << 31) - 1
+
+
+def _normalize_array_reduction_axis(operation, axis, ndim):
+    """Normalize an array reduction axis and reject out-of-range values."""
+    axis = operator.index(axis)
+    if axis < -ndim or axis >= ndim:
+        raise IndexError(f"{operation}() axis {axis} is out of bounds for an array with {ndim} dimensions")
+
+    return axis % ndim
+
+
+def _validate_apic_array_reduction_layout(operation, inputs, out, axis, output_shape, scalar_size):
+    """Validate reduction metadata that crosses the native signed-int ABI."""
+    if axis is None:
+        reduction_strides = [wp._src.types.type_size_in_bytes(arr.dtype) for arr in inputs]
+    else:
+        reduction_strides = [arr.strides[axis] for arr in inputs]
+
+    if any(stride > _APIC_REDUCTION_INT_MAX for stride in reduction_strides):
+        raise RuntimeError(
+            f"APIC capture does not support {operation}() with a reduction stride greater than "
+            f"{_APIC_REDUCTION_INT_MAX} bytes"
+        )
+
+    participating_arrays = (*inputs, out)
+    if any(not arr.ptr or arr.ptr % scalar_size != 0 for arr in participating_arrays):
+        raise RuntimeError(f"APIC capture requires {operation}() input and output addresses to be scalar-aligned")
+
+    if axis is None:
+        return
+
+    layout_strides = []
+    for arr in inputs:
+        layout_strides.extend(stride for dim, stride in enumerate(arr.strides) if dim == axis or output_shape[dim] > 1)
+    layout_strides.extend(stride for dim, stride in enumerate(out.strides) if output_shape[dim] > 1)
+    if any(stride % scalar_size != 0 for stride in layout_strides):
+        raise RuntimeError(f"APIC capture requires {operation}() participating strides to be scalar-aligned")
+
+
+def array_sum(
+    values: wp.array, out: wp.array | None = None, value_count: int | None = None, axis: int | None = None
+) -> wp.array | float:
+    """Compute the sum of array elements.
+
+    This function computes the sum of array elements, optionally along a specified axis.
+    The operation can be performed on the entire array or along a specific dimension.
+
+    During CPU graph capture, or CUDA graph capture with ``apic=True``,
+    non-empty calls require an explicit ``out`` array so replay can store the
+    current result. Existing whole-array, explicit-count, composite-dtype, and
+    positive-stride axis reductions are recorded. Negative strides raise
+    ``NotImplementedError`` during API Capture (APIC) recording. Counts and
+    reduction strides must fit signed 32-bit integers, and participating
+    addresses and strides must be aligned to the scalar type.
+
+    Args:
+        values: Input array to sum. Its scalar type must be ``float32`` or ``float64``.
+        out: Output array to store results. If ``None``, a new array is created.
+        value_count: Number of elements to process. If ``None``, processes entire array.
+        axis: Axis along which to compute sum. Negative values count from the last dimension. If ``None``, computes
+            sum of all elements.
+
+    Returns:
+        The sum result. Returns a float if ``axis`` is ``None`` and ``out`` is ``None``,
+        otherwise returns the ``out`` array.
+
+    Raises:
+        IndexError: If ``axis`` is outside the valid range for ``values``.
+        RuntimeError: If output array storage device or data type is incompatible with input array, or if an
+            APIC-recorded call uses an unsupported count or memory layout.
+        NotImplementedError: If a non-empty call during APIC recording omits
+            ``out``. Also raised if any input or output array has a negative
+            stride during APIC recording, including for a zero-count call.
+    """
+    if axis is not None:
+        axis = _normalize_array_reduction_axis("array_sum", axis, values.ndim)
+
+    if value_count is None:
+        if axis is None:
+            value_count = values.size
+        else:
+            value_count = values.shape[axis]
+
+    if axis is None:
+        output_shape = (1,)
+    else:
+        output_shape = list(values.shape)
+        output_shape[axis] = 1
+        output_shape = tuple(output_shape)
+
+    has_reduction_work = value_count > 0 and all(dim > 0 for dim in output_shape)
+    type_size = wp._src.types.type_size(values.dtype)
+    scalar_type = wp._src.types.type_scalar_type(values.dtype)
+
+    apic_capture = context._get_apic_capture_for_device(values.device)
+    if apic_capture is not None:
+        if value_count < 0:
+            raise RuntimeError("APIC capture does not support array_sum() with a negative count")
+        if value_count > _APIC_REDUCTION_INT_MAX:
+            raise RuntimeError(
+                f"APIC capture does not support array_sum() with a count greater than {_APIC_REDUCTION_INT_MAX}"
+            )
+        if has_reduction_work and out is None:
+            raise NotImplementedError("APIC capture requires array_sum() to receive an explicit out array")
+        if any(stride < 0 for stride in values.strides) or (
+            out is not None and any(stride < 0 for stride in out.strides)
+        ):
+            raise NotImplementedError("APIC capture does not support array_sum() with negative strides")
+
+    if apic_capture is not None and value_count == 0 and out is None and axis is None:
+        return _array_reduce_host_zero(values.dtype)
+
+    # Users can provide a device output array for storing the sum result.
+    # For convenience, if no output array is provided, the result is returned on the host.
+    if out is None:
+        host_return = True
+        out = wp.empty(shape=output_shape, dtype=values.dtype, device=values.device)
+    else:
+        host_return = False
+        if out.device != values.device:
+            raise RuntimeError("out storage device should match values array")
+        if out.dtype != values.dtype:
+            raise RuntimeError(f"out array should have type {values.dtype.__name__}")
+        if out.shape != output_shape:
+            raise RuntimeError(f"out array should have shape {output_shape}")
+
+    if apic_capture is not None:
+        if has_reduction_work:
+            scalar_size = wp._src.types.type_size_in_bytes(scalar_type)
+            _validate_apic_array_reduction_layout("array_sum", (values,), out, axis, output_shape, scalar_size)
+        apic_capture.track_array(values)
+        apic_capture.track_array(out)
+
+    if value_count == 0:
+        out.zero_()
+        if axis is None and host_return:
+            return out.numpy()[0]
+        return out
+
+    if values.device.is_cpu:
+        if scalar_type == wp.float32:
+            native_func = context.runtime.core.wp_array_sum_float_host
+        elif scalar_type == wp.float64:
+            native_func = context.runtime.core.wp_array_sum_double_host
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
+    elif values.device.is_cuda:
+        if scalar_type == wp.float32:
+            native_func = context.runtime.core.wp_array_sum_float_device
+        elif scalar_type == wp.float64:
+            native_func = context.runtime.core.wp_array_sum_double_device
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
+
+    if axis is None:
+        stride = wp._src.types.type_size_in_bytes(values.dtype)
+        native_func(values.ptr, out.ptr, value_count, stride, type_size)
+
+        if host_return:
+            return out.numpy()[0]
+        return out
+
+    stride = values.strides[axis]
+    for idx in np.ndindex(output_shape):
+        out_offset = sum(i * s for i, s in zip(idx, out.strides, strict=True))
+        val_offset = sum(i * s for i, s in zip(idx, values.strides, strict=True))
+
+        native_func(
+            values.ptr + val_offset,
+            out.ptr + out_offset,
+            value_count,
+            stride,
+            type_size,
+        )
+
+    return out
+
+
+def array_inner(
+    a: wp.array, b: wp.array, out: wp.array | None = None, count: int | None = None, axis: int | None = None
+) -> wp.array | float:
+    """Compute the inner product of two arrays.
+
+    This function computes the dot product between two arrays with the same shape, optionally along a specified axis.
+    When ``axis`` is ``None``, it computes a single inner product over the flattened arrays.
+
+    During CPU graph capture, or CUDA graph capture with ``apic=True``,
+    non-empty calls require an explicit ``out`` array so replay can store the
+    current result. Existing whole-array, explicit-count, composite-dtype, and
+    positive-stride axis reductions are recorded. Negative strides raise
+    ``NotImplementedError`` during API Capture (APIC) recording. Counts and
+    reduction strides must fit signed 32-bit integers, and participating
+    addresses and strides must be aligned to the scalar type.
+
+    Args:
+        a: First input array.
+        b: Second input array. Must have the same shape and data type as ``a``.
+        out: Output array to store results. If ``None``, a new array is created.
+        count: Number of elements to process. If ``None``, processes entire arrays.
+        axis: Axis along which to compute inner product. Negative values count from the last dimension. If ``None``,
+            computes a single inner product over the flattened arrays.
+
+    Returns:
+        The inner product result. Returns a float if ``axis`` is ``None`` and ``out`` is ``None``,
+        otherwise returns the ``out`` array.
+
+    Raises:
+        ValueError: If ``a`` and ``b`` have different shapes.
+        IndexError: If ``axis`` is outside the valid range for ``a``.
+        RuntimeError: If array storage devices or data types are incompatible, or if an APIC-recorded call uses an
+            unsupported count or memory layout.
+        NotImplementedError: If a non-empty call during APIC recording omits
+            ``out``. Also raised if any input or output array has a negative
+            stride during APIC recording, including for a zero-count call.
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"array_inner() arguments must have the same shape, got {a.shape} and {b.shape}")
+
+    if a.device != b.device:
+        raise RuntimeError(f"A and b array storage devices do not match ({a.device} vs {b.device})")
+
+    if not types_equal(a.dtype, b.dtype):
+        raise RuntimeError(f"A and b array data types do not match ({type_repr(a.dtype)} vs {type_repr(b.dtype)})")
+
+    if axis is not None:
+        axis = _normalize_array_reduction_axis("array_inner", axis, a.ndim)
+
+    if count is None:
+        if axis is None:
+            count = a.size
+        else:
+            count = a.shape[axis]
+
+    if axis is None:
+        output_shape = (1,)
+    else:
+        output_shape = list(a.shape)
+        output_shape[axis] = 1
+        output_shape = tuple(output_shape)
+
+    has_reduction_work = count > 0 and all(dim > 0 for dim in output_shape)
+    type_size = wp._src.types.type_size(a.dtype)
+    scalar_type = wp._src.types.type_scalar_type(a.dtype)
+
+    apic_capture = context._get_apic_capture_for_device(a.device)
+    if apic_capture is not None:
+        if count < 0:
+            raise RuntimeError("APIC capture does not support array_inner() with a negative count")
+        if count > _APIC_REDUCTION_INT_MAX:
+            raise RuntimeError(
+                f"APIC capture does not support array_inner() with a count greater than {_APIC_REDUCTION_INT_MAX}"
+            )
+        if has_reduction_work and out is None:
+            raise NotImplementedError("APIC capture requires array_inner() to receive an explicit out array")
+        has_negative_stride = any(stride < 0 for stride in a.strides) or any(stride < 0 for stride in b.strides)
+        has_negative_stride = has_negative_stride or (out is not None and any(stride < 0 for stride in out.strides))
+        if has_negative_stride:
+            raise NotImplementedError("APIC capture does not support array_inner() with negative strides")
+
+    # Users can provide a device output array for storing the inner-product result.
+    # For convenience, if no output array is provided, the result is returned on the host.
+    if out is None:
+        host_return = True
+        out = wp.empty(shape=output_shape, dtype=scalar_type, device=a.device)
+    else:
+        host_return = False
+        if out.device != a.device:
+            raise RuntimeError("out storage device should match values array")
+        if out.dtype != scalar_type:
+            raise RuntimeError(f"out array should have type {scalar_type.__name__}")
+        if out.shape != output_shape:
+            raise RuntimeError(f"out array should have shape {output_shape}")
+
+    if apic_capture is not None:
+        if has_reduction_work:
+            scalar_size = wp._src.types.type_size_in_bytes(scalar_type)
+            _validate_apic_array_reduction_layout("array_inner", (a, b), out, axis, output_shape, scalar_size)
+        apic_capture.track_array(a)
+        apic_capture.track_array(b)
+        apic_capture.track_array(out)
+
+    if count == 0:
+        if axis is None and host_return:
+            return 0.0
+        out.zero_()
+        return out
+
+    if a.device.is_cpu:
+        if scalar_type == wp.float32:
+            native_func = context.runtime.core.wp_array_inner_float_host
+        elif scalar_type == wp.float64:
+            native_func = context.runtime.core.wp_array_inner_double_host
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(a.dtype)}")
+    elif a.device.is_cuda:
+        if scalar_type == wp.float32:
+            native_func = context.runtime.core.wp_array_inner_float_device
+        elif scalar_type == wp.float64:
+            native_func = context.runtime.core.wp_array_inner_double_device
+        else:
+            raise RuntimeError(f"Unsupported data type: {type_repr(a.dtype)}")
+
+    if axis is None:
+        stride_a = wp._src.types.type_size_in_bytes(a.dtype)
+        stride_b = wp._src.types.type_size_in_bytes(b.dtype)
+        native_func(a.ptr, b.ptr, out.ptr, count, stride_a, stride_b, type_size)
+
+        if host_return:
+            return out.numpy()[0]
+        return out
+
+    stride_a = a.strides[axis]
+    stride_b = b.strides[axis]
+
+    for idx in np.ndindex(output_shape):
+        out_offset = sum(i * s for i, s in zip(idx, out.strides, strict=True))
+        a_offset = sum(i * s for i, s in zip(idx, a.strides, strict=True))
+        b_offset = sum(i * s for i, s in zip(idx, b.strides, strict=True))
+
+        native_func(
+            a.ptr + a_offset,
+            b.ptr + b_offset,
+            out.ptr + out_offset,
+            count,
+            stride_a,
+            stride_b,
+            type_size,
+        )
+
+    return out
+
+
+@wp.kernel
+def _array_cast_kernel(
+    dest: Any,
+    src: Any,
+):
+    i = wp.tid()
+    dest[i] = dest.dtype(src[i])
+
+
+def array_cast(in_array: warp.array, out_array: warp.array, count: int | None = None):
+    """Cast elements from one array to another array with a different data type.
+
+    This function performs element-wise casting from the input array to the output array.
+    The arrays must have the same number of dimensions and data type shapes. If they don't match,
+    the arrays will be flattened and casting will be performed at the scalar level.
+
+    Args:
+        in_array: Input array to cast from.
+        out_array: Output array to cast to. Must have the same device as in_array.
+        count: Number of elements to process. If ``None``, processes entire array.
+          or multi-dimensional arrays, partial casting is not supported.
+
+    Raises:
+        RuntimeError: If arrays have different devices or if attempting partial casting
+                     on multi-dimensional arrays.
+
+    Note:
+        If the input and output arrays have the same data type, this function will
+        simply copy the data without any conversion.
+    """
+    if in_array.device != out_array.device:
+        raise RuntimeError(f"Array storage devices do not match ({in_array.device} vs {out_array.device})")
+
+    in_array_data_shape = getattr(in_array.dtype, "_shape_", ())
+    out_array_data_shape = getattr(out_array.dtype, "_shape_", ())
+
+    if in_array.ndim != out_array.ndim or in_array_data_shape != out_array_data_shape:
+        # Number of dimensions or data type shape do not match.
+        # Flatten arrays and do cast at the scalar level
+        in_array = in_array.flatten()
+        out_array = out_array.flatten()
+
+        in_array_data_length = warp._src.types.type_size(in_array.dtype)
+        out_array_data_length = warp._src.types.type_size(out_array.dtype)
+        in_array_scalar_type = wp._src.types.type_scalar_type(in_array.dtype)
+        out_array_scalar_type = wp._src.types.type_scalar_type(out_array.dtype)
+
+        in_array = wp.array(
+            data=None,
+            ptr=in_array.ptr,
+            capacity=in_array.capacity,
+            device=in_array.device,
+            dtype=in_array_scalar_type,
+            shape=in_array.shape[0] * in_array_data_length,
+        )
+
+        out_array = wp.array(
+            data=None,
+            ptr=out_array.ptr,
+            capacity=out_array.capacity,
+            device=out_array.device,
+            dtype=out_array_scalar_type,
+            shape=out_array.shape[0] * out_array_data_length,
+        )
+
+        if count is not None:
+            count *= in_array_data_length
+
+    if count is None:
+        count = in_array.size
+
+    if in_array.ndim == 1:
+        dim = count
+    elif count < in_array.size:
+        raise RuntimeError("Partial cast is not supported for arrays with more than one dimension")
+    else:
+        dim = in_array.shape
+
+    if in_array.dtype == out_array.dtype:
+        # Same data type, can simply copy
+        wp.copy(dest=out_array, src=in_array, count=count)
+    else:
+        wp.launch(kernel=_array_cast_kernel, dim=dim, inputs=[out_array, in_array], device=out_array.device)
+
+
+def create_warp_function(func: Callable) -> tuple[wp.Function, warp._src.context.Module]:
+    """Create a Warp function from a Python function.
+
+    Args:
+        func: A Python function to be converted to a Warp function.
+
+    Returns:
+        A tuple containing the created Warp function and the module it belongs to.
+    """
+
+    from .codegen import Adjoint, get_full_arg_spec  # noqa: PLC0415
+
+    def unique_name(code: str):
+        return f"func_{hashlib.sha256(code.encode('utf-8')).hexdigest()[:16]}"
+
+    # Create a Warp function from the input function
+    source = None
+    argspec = get_full_arg_spec(func)
+    key = getattr(func, "__name__", None)
+    if key is None:
+        source, _, _ = Adjoint.extract_function_source(func)
+        key = unique_name(source)
+    elif key == "<lambda>":
+        body = Adjoint.extract_lambda_source(func, only_body=True)
+        if body is None:
+            raise ValueError("Could not extract lambda source code")
+        key = unique_name(body)
+        source = f"def {key}({', '.join(argspec.args)}):\n  return {body}"
+    else:
+        # use the qualname of the function as the key
+        key = getattr(func, "__qualname__", key)
+        key = key.replace(".", "_").replace(" ", "_").replace("<", "").replace(">", "_")
+
+    module = warp._src.context.get_module(f"map_{key}")
+    func = wp.Function(
+        func,
+        namespace="",
+        module=module,
+        key=key,
+        source=source,
+        overloaded_annotations=dict.fromkeys(argspec.args, Any),
+    )
+    return func, module
+
+
+def broadcast_shapes(shapes: list[tuple[int]]) -> tuple[int]:
+    """Broadcast a list of shapes to a common shape.
+
+    Following the broadcasting rules of NumPy, two shapes are compatible when:
+    starting from the trailing dimension,
+        1. the two dimensions are equal, or
+        2. one of the dimensions is 1.
+
+    Example:
+        .. code-block:: python
+
+            broadcast_shapes([(3, 1, 4), (5, 4)])  # Returns (3, 5, 4)
+
+    Returns:
+        The broadcasted shape.
+
+    Raises:
+        ValueError: If the shapes are not broadcastable.
+    """
+    ref = shapes[0]
+    for shape in shapes[1:]:
+        broad = []
+        for j in range(1, max(len(ref), len(shape)) + 1):
+            if j <= len(ref) and j <= len(shape):
+                s = shape[-j]
+                r = ref[-j]
+                if s == r:
+                    broad.append(s)
+                elif s == 1 or r == 1:
+                    broad.append(max(s, r))
+                else:
+                    raise ValueError(f"Shapes {ref} and {shape} are not broadcastable")
+            elif j <= len(ref):
+                broad.append(ref[-j])
+            else:
+                broad.append(shape[-j])
+        ref = tuple(reversed(broad))
+    return ref
+
+
+def map(
+    func: Callable | wp.Function,
+    *inputs: Array[DType] | Any,
+    out: Array[DType] | list[Array[DType]] | None = None,
+    return_kernel: bool = False,
+    block_dim: int | None = None,
+    device: DeviceLike = None,
+) -> Array[DType] | list[Array[DType]] | wp.Kernel:
+    """Map a function over the elements of one or more arrays.
+
+    You can use a Warp function, a regular Python function, or a lambda expression to map it to a set of arrays.
+
+    .. testcode::
+
+        a = wp.array([1, 2, 3], dtype=wp.float32)
+        b = wp.array([4, 5, 6], dtype=wp.float32)
+        c = wp.array([7, 8, 9], dtype=wp.float32)
+        result = wp.map(lambda x, y, z: x + 2.0 * y - z, a, b, c)
+        print(result)
+
+    .. testoutput::
+
+        [2. 4. 6.]
+
+    Clamp values in an array in place:
+
+    .. testcode::
+
+        xs = wp.array([-1.0, 0.0, 1.0], dtype=wp.float32)
+        wp.map(wp.clamp, xs, -0.5, 0.5, out=xs)
+        print(xs)
+
+    .. testoutput::
+
+        [-0.5  0.   0.5]
+
+    Note that only one of the inputs must be a Warp array. For example, it is possible
+    vectorize the function :func:`~warp._src.lang.transform_point` over a collection of points
+    with a given input transform as follows:
+
+    .. code-block:: python
+
+        tf = wp.transform((1.0, 2.0, 3.0), wp.quat_rpy(0.2, -0.6, 0.1))
+        points = wp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=wp.vec3)
+        transformed = wp.map(wp.transform_point, tf, points)
+
+    Besides regular Warp arrays, other array types, such as the :class:`warp.indexedarray`, are supported as well:
+
+    .. testcode::
+
+        arr = wp.array(data=np.arange(10, dtype=np.float32))
+        indices = wp.array([1, 3, 5, 7, 9], dtype=int)
+        iarr = wp.indexedarray1d(arr, [indices])
+        out = wp.map(lambda x: x * 10.0, iarr)
+        print(out)
+
+    .. testoutput::
+
+        [10. 30. 50. 70. 90.]
+
+    If multiple arrays are provided, the
+    `NumPy broadcasting rules <https://numpy.org/doc/stable/user/basics.broadcasting.html>`_
+    are applied to determine the shape of the output array.
+    Two shapes are compatible when:
+    starting from the trailing dimension,
+
+    1. the two dimensions are equal, or
+    2. one of the dimensions is 1.
+
+    For example, given arrays of shapes ``(3, 1, 4)`` and ``(5, 4)``, the broadcasted
+    shape is ``(3, 5, 4)``.
+
+    If no array(s) are provided to the ``out`` argument, the output array(s) are created automatically.
+    The data type(s) of the output array(s) are determined by the type of the return value(s) of
+    the function. The ``requires_grad`` flag for an automatically created output array is set to ``True``
+    if any of the input arrays have it set to ``True`` and the respective output array's ``dtype`` is a type that
+    supports differentiation.
+
+    Args:
+        func: The function to map over the arrays.
+        *inputs: The input arrays or values to pass to the function.
+        out: Optional output array(s) to store the result(s). If None, the output array(s) will be created automatically.
+        return_kernel: If True, only return the generated kernel without performing the mapping operation.
+        block_dim: The requested number of threads per block. Defaults to 1 on CPU and 256 on CUDA.
+        device: The device on which to run the kernel.
+
+    Returns:
+        array | list[array] | Kernel:
+            The resulting array(s) of the mapping. If ``return_kernel`` is True, only returns the kernel used for mapping.
+    """
+
+    import builtins  # noqa: PLC0415
+
+    from .codegen import Adjoint, Struct, StructInstance  # noqa: PLC0415
+    from .types import (  # noqa: PLC0415
+        is_array,
+        type_is_matrix,
+        type_is_quaternion,
+        type_is_transformation,
+        type_is_vector,
+        type_repr,
+        type_to_warp,
+        types_equal,
+    )
+
+    # mapping from struct name to its Python definition
+    referenced_modules: dict[str, ModuleType] = {}
+
+    def type_to_code(wp_type) -> str:
+        """Return the string representation of a given Warp type."""
+        if is_array(wp_type):
+            return f"warp.array(ndim={wp_type.ndim}, dtype={type_to_code(wp_type.dtype)})"
+        if isinstance(wp_type, Struct):
+            key = f"{wp_type.__module__}.{wp_type.key}"
+            module = sys.modules.get(wp_type.__module__, None)
+            if module is not None:
+                referenced_modules[wp_type.__module__] = module
+            return key
+        if type_is_transformation(wp_type):
+            return f"warp.types.transformation(dtype={type_to_code(wp_type._wp_scalar_type_)})"
+        if type_is_quaternion(wp_type):
+            return f"warp.types.quaternion(dtype={type_to_code(wp_type._wp_scalar_type_)})"
+        if type_is_vector(wp_type):
+            return f"warp.types.vector(length={wp_type._shape_[0]}, dtype={type_to_code(wp_type._wp_scalar_type_)})"
+        if type_is_matrix(wp_type):
+            return f"warp.types.matrix(shape=({wp_type._shape_[0]}, {wp_type._shape_[1]}), dtype={type_to_code(wp_type._wp_scalar_type_)})"
+        if wp_type == builtins.bool:
+            return "bool"
+        if wp_type == builtins.float:
+            return "float"
+        if wp_type == builtins.int:
+            return "int"
+
+        name = getattr(wp_type, "__name__", None)
+        if name is None:
+            return type_repr(wp_type)
+        name = getattr(wp_type, "__qualname__", name)
+        module = getattr(wp_type, "__module__", None)
+        if module is not None:
+            referenced_modules[wp_type.__module__] = module
+        return wp_type.__module__ + "." + name
+
+    def get_warp_type(value):
+        dtype = type(value)
+        if issubclass(dtype, StructInstance):
+            # a struct
+            return value._cls
+        return type_to_warp(dtype)
+
+    module = None
+    out_dtypes = None
+    if isinstance(func, wp.Function):
+        func_name = func.key
+        wp_func = func
+    else:
+        # check if op is a callable function
+        if not callable(func):
+            raise TypeError("func must be a callable function or a warp.Function")
+        wp_func, module = create_warp_function(func)
+        func_name = wp_func.key
+    if module is None:
+        module = warp._src.context.get_module(f"map_{func_name}")
+
+    arg_names = list(wp_func.input_types.keys())
+
+    if len(inputs) != len(arg_names):
+        raise TypeError(
+            f"Number of input arguments ({len(inputs)}) does not match expected number of function arguments ({len(arg_names)})"
+        )
+
+    # Build input descriptors and arg_types for cache lookup
+    arg_types = {}
+    arg_values = {}
+    input_descriptors = []
+    for i, arg_name in enumerate(arg_names):
+        if is_array(inputs[i]):
+            # we will pass an element of the array to the function
+            arg_types[arg_name] = inputs[i].dtype
+            if device is None:
+                device = inputs[i].device
+            # For cache key: capture array type, dtype, ndim, and broadcast mask
+            broadcast_mask = tuple(d == 1 for d in inputs[i].shape)
+            input_descriptors.append((True, type(inputs[i]).__name__, inputs[i].dtype, inputs[i].ndim, broadcast_mask))
+        else:
+            # we pass the input value directly to the function
+            warp_type = get_warp_type(inputs[i])
+            arg_types[arg_name] = warp_type
+            input_descriptors.append((False, warp_type))
+
+    # Build output type descriptors for cache key
+    # Only differentiate when output is not a regular array (e.g., indexedarray)
+    # since out=None creates regular arrays and should share cache with explicit array outputs
+    def get_output_type_descriptor(o):
+        type_name = type(o).__name__
+        return type_name if type_name != "array" else None
+
+    if out is None:
+        output_type_descriptor = None  # Will use default 'array' type
+    elif is_array(out):
+        output_type_descriptor = get_output_type_descriptor(out)
+    elif isinstance(out, (tuple, list)):
+        descriptors = tuple(get_output_type_descriptor(o) for o in out)
+        # Only include if any output is non-array type
+        output_type_descriptor = descriptors if any(d is not None for d in descriptors) else None
+    else:
+        output_type_descriptor = None
+
+    # Check unified cache for output types and kernel
+    cache_key = (func_name, tuple(input_descriptors), output_type_descriptor)
+    cached = map_cache.get(cache_key)
+
+    if cached is not None:
+        out_dtypes, kernel = cached
+    else:
+        # Compute output types (expensive)
+        func_or_none = wp_func.get_overload(list(arg_types.values()), {})
+        if func_or_none is None:
+            raise TypeError(
+                f"Function {func_name} does not support the provided argument types {', '.join(type_repr(t) for t in arg_types.values())}"
+            )
+        func = func_or_none
+
+        if func.value_type is not None:
+            out_dtype = func.value_type
+        elif func.value_func is not None:
+            out_dtype = func.value_func(arg_types, arg_values)
+        else:
+            func.build(None)
+            out_dtype = func.value_func(arg_types, arg_values)
+
+        if out_dtype is None:
+            raise TypeError("The provided function must return a value")
+
+        if isinstance(out_dtype, (tuple, list)):
+            out_dtypes = tuple(out_dtype)
+        else:
+            out_dtypes = (out_dtype,)
+
+        kernel = None  # Will be generated below
+
+    # gather the arrays in the inputs to determine the output shape
+    array_shapes = [a.shape for a in inputs if is_array(a)]
+    if len(array_shapes) == 0:
+        raise ValueError("map requires at least one warp.array input")
+    # broadcast the shapes of the arrays
+    out_shape = broadcast_shapes(array_shapes)
+
+    if out is None:
+        requires_grad = any(getattr(a, "requires_grad", False) for a in inputs if is_array(a))
+        outputs = []
+        for dtype in out_dtypes:
+            rg = requires_grad and Adjoint.is_differentiable_value_type(dtype)
+            outputs.append(wp.empty(out_shape, dtype=dtype, requires_grad=rg, device=device))
+    elif len(out_dtypes) == 1 and is_array(out):
+        if not types_equal(out.dtype, out_dtypes[0]):
+            raise TypeError(
+                f"Output array dtype {type_repr(out.dtype)} does not match expected dtype {type_repr(out_dtypes[0])}"
+            )
+        if out.shape != out_shape:
+            raise TypeError(f"Output array shape {out.shape} does not match expected shape {out_shape}")
+        outputs = [out]
+    elif len(out_dtypes) > 1:
+        if isinstance(out, tuple) or isinstance(out, list):
+            if len(out) != len(out_dtypes):
+                raise TypeError(
+                    f"Number of provided output arrays ({len(out)}) does not match expected number of function outputs ({len(out_dtypes)})"
+                )
+            for i, a in enumerate(out):
+                if not types_equal(a.dtype, out_dtypes[i]):
+                    raise TypeError(
+                        f"Output array {i} dtype {type_repr(a.dtype)} does not match expected dtype {type_repr(out_dtypes[i])}"
+                    )
+                if a.shape != out_shape:
+                    raise TypeError(f"Output array {i} shape {a.shape} does not match expected shape {out_shape}")
+            outputs = list(out)
+        else:
+            raise TypeError(
+                f"Invalid output provided, expected {len(out_dtypes)} Warp arrays with shape {out_shape} and dtypes ({', '.join(type_repr(t) for t in out_dtypes)})"
+            )
+
+    # Generate kernel if not cached
+    if kernel is None:
+        # create code for a kernel
+        code = """def map_kernel({kernel_args}):
+    {tids} = wp.tid()
+    {load_args}
+    """
+        if len(out_dtypes) == 1:
+            code += "__out_0[{tids}] = {func_name}({arg_names})"
+        else:
+            code += ", ".join(f"__o_{i}" for i in range(len(out_dtypes)))
+            code += " = {func_name}({arg_names})\n"
+            for i in range(len(out_dtypes)):
+                code += f"    __out_{i}" + "[{tids}]" + f" = __o_{i}\n"
+
+        tids = [f"__tid_{i}" for i in range(len(out_shape))]
+
+        load_args = []
+        kernel_args = []
+        for arg_name, inp in zip(arg_names, inputs, strict=True):
+            if is_array(inp):
+                arr_name = f"{arg_name}_array"
+                array_type_name = type(inp).__name__
+                kernel_args.append(
+                    f"{arr_name}: wp.{array_type_name}(dtype={type_to_code(inp.dtype)}, ndim={inp.ndim})"
+                )
+                shape = inp.shape
+                indices = []
+                for i in range(1, len(shape) + 1):
+                    if shape[-i] == 1:
+                        indices.append("0")
+                    else:
+                        indices.append(tids[-i])
+
+                load_args.append(f"{arg_name} = {arr_name}[{', '.join(reversed(indices))}]")
+            else:
+                kernel_args.append(f"{arg_name}: {type_to_code(type(inp))}")
+        for i, o in enumerate(outputs):
+            kernel_args.append(f"__out_{i}: wp.{type(o).__name__}(dtype={type_to_code(o.dtype)}, ndim={o.ndim})")
+        code = code.format(
+            func_name=func_name,
+            kernel_args=", ".join(kernel_args),
+            arg_names=", ".join(arg_names),
+            tids=", ".join(tids),
+            load_args="\n    ".join(load_args),
+        )
+        namespace = {"wp": wp, "warp": wp, func_name: wp_func, "Any": Any} | referenced_modules
+        exec(code, namespace)
+
+        kernel = wp.Kernel(namespace["map_kernel"], key="map_kernel", source=code, module=module)
+        map_cache[cache_key] = (out_dtypes, kernel)
+
+    if return_kernel:
+        return kernel
+
+    wp.launch(
+        kernel,
+        dim=out_shape,
+        inputs=inputs,
+        outputs=outputs,
+        block_dim=block_dim,
+        device=device,
+    )
+
+    if len(outputs) == 1:
+        o = outputs[0]
+    else:
+        o = outputs
+
+    return o
+
+
+# code snippet for invoking cProfile
+# cp = cProfile.Profile()
+# cp.enable()
+# for i in range(1000):
+#     self.state = self.integrator.forward(self.model, self.state, self.sim_dt)
+
+# cp.disable()
+# cp.print_stats(sort='tottime')
+# exit(0)
+
+
+# helper kernels for initializing NVDB volumes from a dense array
+@wp.kernel
+def copy_dense_volume_to_nano_vdb_v(volume: wp.uint64, values: wp.array(dtype=wp.vec3, ndim=3)):
+    i, j, k = wp.tid()
+    wp.volume_store_v(volume, i, j, k, values[i, j, k])
+
+
+@wp.kernel
+def copy_dense_volume_to_nano_vdb_f(volume: wp.uint64, values: wp.array(dtype=wp.float32, ndim=3)):
+    i, j, k = wp.tid()
+    wp.volume_store_f(volume, i, j, k, values[i, j, k])
+
+
+@wp.kernel
+def copy_dense_volume_to_nano_vdb_i(volume: wp.uint64, values: wp.array(dtype=wp.int32, ndim=3)):
+    i, j, k = wp.tid()
+    wp.volume_store_i(volume, i, j, k, values[i, j, k])
+
+
+# represent an edge between v0, v1 with connected faces f0, f1, and opposite vertex o0, and o1
+# winding is such that first tri can be reconstructed as {v0, v1, o0}, and second tri as { v1, v0, o1 }
+class MeshEdge:
+    def __init__(self, v0, v1, o0, o1, f0, f1):
+        self.v0 = v0  # vertex 0
+        self.v1 = v1  # vertex 1
+        self.o0 = o0  # opposite vertex 1
+        self.o1 = o1  # opposite vertex 2
+        self.f0 = f0  # index of tri1
+        self.f1 = f1  # index of tri2
+
+
+class MeshAdjacency:
+    def __init__(self, indices, num_tris):
+        # map edges (v0, v1) to faces (f0, f1)
+        self.edges = {}
+        self.indices = indices
+
+        for index, tri in enumerate(indices):
+            self.add_edge(tri[0], tri[1], tri[2], index)
+            self.add_edge(tri[1], tri[2], tri[0], index)
+            self.add_edge(tri[2], tri[0], tri[1], index)
+
+    def add_edge(self, i0, i1, o, f):  # index1, index2, index3, index of triangle
+        key = (min(i0, i1), max(i0, i1))
+        edge = None
+
+        if key in self.edges:
+            edge = self.edges[key]
+
+            if edge.f1 != -1:
+                print("Detected non-manifold edge")
+                return
+            else:
+                # update other side of the edge
+                edge.o1 = o
+                edge.f1 = f
+        else:
+            # create new edge with opposite yet to be filled
+            edge = MeshEdge(i0, i1, o, -1, f, -1)
+
+        self.edges[key] = edge
+
+
+def mem_report():  # pragma: no cover
+    def _mem_report(tensors, mem_type):
+        """Print the selected tensors of type
+        There are two major storage types in our major concern:
+            - GPU: tensors transferred to CUDA devices
+            - CPU: tensors remaining on the system memory (usually unimportant)
+        Args:
+            - tensors: the tensors of specified type
+            - mem_type: 'CPU' or 'GPU' in current implementation"""
+        total_numel = 0
+        total_mem = 0
+        visited_data = []
+        for tensor in tensors:
+            if tensor.is_sparse:
+                continue
+            # a data_ptr indicates a memory block allocated
+            data_ptr = tensor.storage().data_ptr()
+            if data_ptr in visited_data:
+                continue
+            visited_data.append(data_ptr)
+
+            numel = tensor.storage().size()
+            total_numel += numel
+            element_size = tensor.storage().element_size()
+            mem = numel * element_size / 1024 / 1024  # 32bit=4Byte, MByte
+            total_mem += mem
+        print(f"Type: {mem_type:<4} | Total Tensors: {total_numel:>8} | Used Memory: {total_mem:>8.2f} MB")
+
+    import torch  # noqa: PLC0415
+
+    gc.collect()
+
+    LEN = 65
+    objects = gc.get_objects()
+    # print('%s\t%s\t\t\t%s' %('Element type', 'Size', 'Used MEM(MBytes)') )
+    tensors = [obj for obj in objects if torch.is_tensor(obj)]
+    cuda_tensors = [t for t in tensors if t.is_cuda]
+    host_tensors = [t for t in tensors if not t.is_cuda]
+    _mem_report(cuda_tensors, "GPU")
+    _mem_report(host_tensors, "CPU")
+    print("=" * LEN)
+
+
+class ScopedDevice:
+    """A context manager to temporarily change the current default device.
+
+    For CUDA devices, this context manager makes the device's CUDA context
+    current and restores the previous CUDA context on exit. This is handy when
+    running Warp scripts as part of a bigger pipeline because it avoids any side
+    effects of changing the CUDA context in the enclosed code.
+
+    Attributes:
+        device (Device): The device that will temporarily become the default
+          device within the context.
+        saved_device (Device): The previous default device. This is restored as
+          the default device on exiting the context.
+    """
+
+    def __init__(self, device: DeviceLike):
+        """Initialize the context manager with a device.
+
+        Args:
+            device: The device that will temporarily become the default device
+              within the context.
+        """
+        self.device = wp.get_device(device)
+
+    def __enter__(self):
+        # save the previous default device
+        self.saved_device = self.device.runtime.default_device
+
+        # make this the default device
+        self.device.runtime.default_device = self.device
+
+        # make it the current CUDA device so that device alias "cuda" will evaluate to this device
+        self.device.context_guard.__enter__()
+
+        return self.device
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # restore original CUDA context
+        self.device.context_guard.__exit__(exc_type, exc_value, traceback)
+
+        # restore original target device
+        self.device.runtime.default_device = self.saved_device
+
+
+class ScopedStream:
+    """A context manager to temporarily change the current stream on a device.
+
+    Attributes:
+        stream (Stream or None): The stream that will temporarily become the device's
+          default stream within the context.
+        saved_stream (Stream): The device's previous current stream. This is
+          restored as the device's current stream on exiting the context.
+        sync_enter (bool): Whether to synchronize this context's stream with
+          the device's previous current stream on entering the context.
+        sync_exit (bool): Whether to synchronize the device's previous current
+          with this context's stream on exiting the context.
+        device (Device): The device associated with the stream.
+    """
+
+    def __init__(self, stream: wp.Stream | None, sync_enter: bool = True, sync_exit: bool = False):
+        """Initialize the context manager with a stream and synchronization options.
+
+        Args:
+            stream: The stream that will temporarily become the device's
+              default stream within the context.
+            sync_enter (bool): Whether to synchronize this context's stream with
+              the device's previous current stream on entering the context.
+            sync_exit (bool): Whether to synchronize the device's previous current
+              with this context's stream on exiting the context.
+        """
+
+        self.stream = stream
+        self.sync_enter = sync_enter
+        self.sync_exit = sync_exit
+        if stream is not None:
+            self.device = stream.device
+            self.device_scope = ScopedDevice(self.device)
+
+    def __enter__(self):
+        if self.stream is not None:
+            self.device_scope.__enter__()
+            self.saved_stream = self.device.stream
+            self.device.set_stream(self.stream, self.sync_enter)
+
+        return self.stream
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.stream is not None:
+            self.device.set_stream(self.saved_stream, self.sync_exit)
+            self.device_scope.__exit__(exc_type, exc_value, traceback)
+
+
+TIMING_KERNEL = 1
+"""Timing flag for user-defined kernel launches."""
+
+TIMING_KERNEL_BUILTIN = 2
+"""Timing flag for built-in kernel operations (e.g., array fill, copy)."""
+
+TIMING_MEMCPY = 4
+"""Timing flag for memory copy operations."""
+
+TIMING_MEMSET = 8
+"""Timing flag for memory set operations."""
+
+TIMING_GRAPH = 16
+"""Timing flag for CUDA graph launches."""
+
+TIMING_ALL = 0xFFFFFFFF
+"""Timing flag to capture all CUDA activities."""
+
+
+# timer utils
+class ScopedTimer:
+    """Context manager for timing code blocks.
+
+    This context manager measures the execution time of the enclosed code block
+    and can optionally print the elapsed time, collect detailed profiling data,
+    or record NVTX ranges.
+    """
+
+    _thread_local = threading.local()
+
+    enabled = True
+
+    def __init__(
+        self,
+        name: str,
+        active: bool = True,
+        print: bool = True,
+        detailed: bool = False,
+        dict: dict[str, list[float]] | None = None,
+        use_nvtx: bool = False,
+        color: int | str = "rapids",
+        synchronize: bool = False,
+        cuda_filter: int = 0,
+        report_func: Callable[[list[TimingResult], str], None] | None = None,
+        skip_tape: bool = False,
+    ):
+        """Context manager object for a timer
+
+        Parameters:
+            name: Name of timer
+            active: Enables this timer
+            print: At context manager exit, print elapsed time to ``sys.stdout``
+            detailed: Collects additional profiling data using cProfile and calls ``print_stats()`` at context exit
+            dict: A dictionary of lists to which the elapsed time will be appended using ``name`` as a key
+            use_nvtx: If true, timing functionality is replaced by an NVTX range
+            color: ARGB value (e.g. 0x00FFFF) or color name (e.g. 'cyan') associated with the NVTX range
+            synchronize: Synchronize the CPU thread with any outstanding CUDA work to return accurate GPU timings
+            cuda_filter: Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
+            report_func: A callback function to print the activity report.
+              If ``None``,  :func:`warp.timing_print` will be used.
+            skip_tape: If true, the timer will not be recorded in the tape
+
+        Attributes:
+            extra_msg (str): Can be set to a string that will be added to the printout at context exit.
+            elapsed (float): The duration of the ``with`` block used with this object
+            timing_results (list[TimingResult]): The list of activity timing results, if collection was requested using ``cuda_filter``
+        """
+        self.name = name
+        self.active = active and self.enabled
+        self.print = print
+        self.detailed = detailed
+        self.dict = dict
+        self.use_nvtx = use_nvtx
+        self.color = color
+        self.synchronize = synchronize
+        self.skip_tape = skip_tape
+        self.elapsed = 0.0
+        self.cuda_filter = cuda_filter
+        self.report_func = report_func or wp.timing_print
+        self.extra_msg = ""  # Can be used to add to the message printed at manager exit
+
+        if self.dict is not None:
+            if name not in self.dict:
+                self.dict[name] = []
+
+        if not hasattr(ScopedTimer._thread_local, "indent"):
+            ScopedTimer._thread_local.indent = -1
+
+    def __enter__(self):
+        if not self.skip_tape and warp._src.context.runtime is not None and warp._src.context.runtime.tape is not None:
+            warp._src.context.runtime.tape.record_scope_begin(self.name)
+        if self.active:
+            if self.synchronize:
+                wp.synchronize()
+
+            if self.cuda_filter:
+                # begin CUDA activity collection, synchronizing if needed
+                timing_begin(self.cuda_filter, synchronize=not self.synchronize)
+
+            if self.detailed:
+                self.cp = cProfile.Profile()
+                self.cp.clear()
+                self.cp.enable()
+
+            if self.use_nvtx:
+                import nvtx  # noqa: PLC0415
+
+                self.nvtx_range_id = nvtx.start_range(self.name, color=self.color)
+
+            if self.print:
+                ScopedTimer._thread_local.indent += 1
+
+                indent = "    " * ScopedTimer._thread_local.indent
+                log_debug(f"{indent}{self.name} ...")
+
+            self.start = time.perf_counter_ns()
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if not self.skip_tape and warp._src.context.runtime is not None and warp._src.context.runtime.tape is not None:
+            warp._src.context.runtime.tape.record_scope_end()
+        if self.active:
+            if self.synchronize:
+                wp.synchronize()
+
+            self.elapsed = (time.perf_counter_ns() - self.start) / 1000000.0
+
+            if self.use_nvtx:
+                import nvtx  # noqa: PLC0415
+
+                nvtx.end_range(self.nvtx_range_id)
+
+            if self.detailed:
+                self.cp.disable()
+                self.cp.print_stats(sort="tottime")
+
+            if self.cuda_filter:
+                # end CUDA activity collection, synchronizing if needed
+                self.timing_results = timing_end(synchronize=not self.synchronize)
+            else:
+                self.timing_results = []
+
+            if self.dict is not None:
+                self.dict[self.name].append(self.elapsed)
+
+            if self.print:
+                indent = "    " * ScopedTimer._thread_local.indent
+
+                if self.timing_results:
+                    self.report_func(self.timing_results, indent=indent)
+
+                # Route the timer's final output through the active logger so
+                # that custom loggers capture it.  Callers
+                # pass ``active=`` to gate by log_level themselves; bypass the
+                # log_level threshold here so an explicitly enabled timer
+                # always emits.
+                logger = get_logger()
+                if self.extra_msg:
+                    logger.info(f"{indent}{self.name} took {self.elapsed:.2f} ms {self.extra_msg}")
+                else:
+                    logger.info(f"{indent}{self.name} took {self.elapsed:.2f} ms")
+
+                ScopedTimer._thread_local.indent -= 1
+
+
+class ScopedCudaProfiler:
+    """Context manager for limiting an external CUDA profiler's capture range.
+
+    Calls :func:`cuda_profiler_start` on entry and :func:`cuda_profiler_stop` on
+    exit. The device is resolved during construction, and the same CUDA context
+    is used when profiling starts and stops even if the current device changes
+    inside the block.
+
+    The attached profiler and its configuration determine which activity is
+    collected, including CUDA API calls, allocations, transfers, kernels, and
+    synchronization.
+
+    Args:
+        device: Device whose CUDA context profiling is controlled for.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedCudaProfiler():
+                run_workload()
+    """
+
+    def __init__(self, device: DeviceLike = None):
+        self.device = wp.get_device(device)
+
+    def __enter__(self):
+        wp.cuda_profiler_start(self.device)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            wp.cuda_profiler_stop(self.device)
+        except Exception:
+            # Only report this exception if __exit__() was reached without an exception,
+            # otherwise re-raise the original exception.
+            if exc_type is None:
+                raise
+
+
+# Allow temporarily enabling/disabling mempool allocators
+class ScopedMempool:
+    """Context manager to temporarily enable or disable memory pool allocators.
+
+    On context exit, the original mempool setting is restored.
+
+    Args:
+        device: The device on which to modify the mempool setting.
+        enable: Whether to enable (``True``) or disable (``False``) the mempool.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedMempool(device, enable=True):
+                # Memory allocations here use the memory pool
+                arr = wp.zeros(1000, dtype=wp.float32, device=device)
+
+    See Also:
+        :func:`is_mempool_enabled`, :func:`set_mempool_enabled`
+    """
+
+    def __init__(self, device: DeviceLike, enable: bool):
+        self.device = wp.get_device(device)
+        self.enable = enable
+
+    def __enter__(self):
+        self.saved_setting = wp.is_mempool_enabled(self.device)
+        wp.set_mempool_enabled(self.device, self.enable)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        wp.set_mempool_enabled(self.device, self.saved_setting)
+
+
+class ScopedAllocator:
+    """Context manager to temporarily use a custom allocator on a device.
+
+    On context exit, the previous allocator setting is restored.
+
+    Args:
+        device: The CUDA device on which to set the allocator.
+        allocator: The allocator to use, or ``None`` to restore the built-in allocator.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedAllocator(device, my_allocator):
+                arr = wp.zeros(1000, dtype=wp.float32, device=device)
+
+    See Also:
+        :func:`set_cuda_allocator`, :func:`set_device_allocator`, :func:`get_device_allocator`
+    """
+
+    def __init__(self, device: DeviceLike, allocator: Allocator | None):
+        self.device = wp.get_device(device)
+        if not self.device.is_cuda:
+            raise RuntimeError("Custom allocators are only supported on CUDA devices")
+        _validate_allocator(allocator)
+        self.allocator = allocator
+
+    def __enter__(self):
+        self.saved = self.device._custom_allocator
+        self.device._custom_allocator = self.allocator
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.device._custom_allocator = self.saved
+
+
+class ScopedLogger:
+    """Context manager to temporarily install a custom logger.
+
+    On context exit, the previous logger is restored.
+
+    Args:
+        logger: A :class:`~warp.Logger`-compatible object, or ``None`` to
+            temporarily restore Warp's built-in default logger.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedLogger(my_capture_logger):
+                wp.launch(...)  # diagnostics flow to my_capture_logger
+
+    See Also:
+        :func:`warp.set_logger`, :func:`warp.get_logger`
+    """
+
+    def __init__(self, logger: Logger | None):
+        if logger is not None:
+            _validate_logger(logger)
+        self.logger = logger
+
+    def __enter__(self):
+        self.saved = get_logger()
+        set_logger(self.logger if self.logger is not None else LoggerBasic())
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # Restore by direct assignment rather than set_logger() to avoid
+        # re-validating the saved logger; a TypeError raised here would mask
+        # any in-flight exception propagating through the context.
+        _logger_module._active_logger = self.saved
+
+
+class ScopedLogLevel:
+    """Context manager to temporarily override :data:`warp.config.log_level`.
+
+    On context exit, the previous value is restored.
+
+    Args:
+        log_level: The log level to set inside the scope. Use one of
+            :data:`~warp.LOG_DEBUG`, :data:`~warp.LOG_INFO`,
+            :data:`~warp.LOG_WARNING`, or :data:`~warp.LOG_ERROR`.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedLogLevel(wp.LOG_WARNING):
+                wp.init()  # banner suppressed inside the scope
+
+    See Also:
+        :data:`warp.config.log_level`
+    """
+
+    def __init__(self, log_level: int):
+        self.log_level = log_level
+
+    def __enter__(self):
+        self.saved = wp.config.log_level
+        wp.config.log_level = self.log_level
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        wp.config.log_level = self.saved
+
+
+# Allow temporarily enabling/disabling mempool access
+class ScopedMempoolAccess:
+    """Context manager to temporarily enable or disable mempool access between devices.
+
+    Mempool access controls whether ``peer_device`` can access allocations from the memory
+    pool of ``target_device``. By default, pool allocations are only accessible on the
+    owning device. When enabled, access applies to all allocations from the pool (not just
+    future ones) and is independent of peer access.
+
+    On context exit, the original access setting is restored.
+
+    Args:
+        target_device: The device whose mempool will be accessed.
+        peer_device: The device that will access the target's mempool.
+        enable: Whether to enable (``True``) or disable (``False``) access.
+
+    See Also:
+        :func:`is_mempool_access_enabled`, :func:`set_mempool_access_enabled`,
+        :class:`ScopedPeerAccess`
+    """
+
+    def __init__(self, target_device: DeviceLike, peer_device: DeviceLike, enable: bool):
+        self.target_device = target_device
+        self.peer_device = peer_device
+        self.enable = enable
+
+    def __enter__(self):
+        self.saved_setting = wp.is_mempool_access_enabled(self.target_device, self.peer_device)
+        wp.set_mempool_access_enabled(self.target_device, self.peer_device, self.enable)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        wp.set_mempool_access_enabled(self.target_device, self.peer_device, self.saved_setting)
+
+
+# Allow temporarily enabling/disabling peer access
+class ScopedPeerAccess:
+    """Context manager to temporarily enable or disable peer access between CUDA devices.
+
+    Peer access allows direct memory access between GPUs without going through host memory.
+    When enabled, access applies to all allocations on ``target_device`` (not just future ones).
+
+    This setting applies to memory allocated using the default CUDA allocator.
+
+    On context exit, the original peer access setting is restored.
+
+    Args:
+        target_device: The device whose memory will be accessed.
+        peer_device: The device that will access the target's memory.
+        enable: Whether to enable (``True``) or disable (``False``) peer access.
+
+    See Also:
+        :func:`is_peer_access_enabled`, :func:`set_peer_access_enabled`,
+        :class:`ScopedMempoolAccess`
+    """
+
+    def __init__(self, target_device: DeviceLike, peer_device: DeviceLike, enable: bool):
+        self.target_device = target_device
+        self.peer_device = peer_device
+        self.enable = enable
+
+    def __enter__(self):
+        self.saved_setting = wp.is_peer_access_enabled(self.target_device, self.peer_device)
+        wp.set_peer_access_enabled(self.target_device, self.peer_device, self.enable)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        wp.set_peer_access_enabled(self.target_device, self.peer_device, self.saved_setting)
+
+
+class ScopedCapture:
+    """Context manager to capture a sequence of operations into a graph.
+
+    Captures supported Warp operations for later replay with reduced launch
+    overhead. Works on both CPU and CUDA devices. The captured graph is
+    available as the ``graph`` attribute after exiting the context.
+
+    Args:
+        device: Device on which to capture operations (CPU or CUDA).
+        stream: Stream on which to capture operations (CUDA only).
+        force_module_load: If ``True``, force all modules to load before capture begins.
+        external: If ``True``, indicates an external CUDA graph capture is already active.
+            The ``capture_mode`` argument should specify the mode that was used to
+            initiate the external capture.
+        apic: If ``True``, enable API Capture (APIC) recording for serialization via
+            :func:`capture_save`. On CPU, recording always occurs regardless
+            of this flag (needed for CPU graph replay). Default is ``False``.
+        capture_mode: The :class:`~warp.CaptureMode` to use when opening
+            the capture. Defaults to :attr:`CaptureMode.THREAD_LOCAL`.
+            See :func:`capture_begin` for details.
+
+    Attributes:
+        graph: The captured graph, available after context exit.
+        active: Whether capture is currently in progress.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedCapture() as capture:
+                wp.launch(my_kernel, dim=n, inputs=[arr])
+
+            # Replay the captured graph
+            wp.capture_launch(capture.graph)
+
+    See Also:
+        :func:`capture_begin`, :func:`capture_end`, :func:`capture_launch`
+    """
+
+    def __init__(
+        self,
+        device: DeviceLike = None,
+        stream=None,
+        force_module_load=None,
+        external=False,
+        apic: bool = False,
+        capture_mode: CaptureMode = CaptureMode.THREAD_LOCAL,
+    ):
+        self.device = device
+        self.stream = stream
+        self.force_module_load = force_module_load
+        self.external = external
+        self.apic = apic
+        self.capture_mode = capture_mode
+        self.active = False
+        self.graph = None
+
+    def __enter__(self):
+        try:
+            wp.capture_begin(
+                device=self.device,
+                stream=self.stream,
+                force_module_load=self.force_module_load,
+                external=self.external,
+                apic=self.apic,
+                capture_mode=self.capture_mode,
+            )
+            self.active = True
+            return self
+        except:
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.active:
+            try:
+                self.graph = wp.capture_end(device=self.device, stream=self.stream)
+            except Exception:
+                # Only report this exception if __exit__() was reached without an exception,
+                # otherwise re-raise the original exception.
+                if exc_type is None:
+                    raise
+            finally:
+                self.active = False
+
+
+def check_p2p():
+    """Check if the machine is configured properly for peer-to-peer transfers.
+
+    Returns:
+        A Boolean indicating whether the machine is configured properly for peer-to-peer transfers.
+        On Linux, this function attempts to determine if IOMMU is enabled and will return `False` if IOMMU is detected.
+        On other operating systems, it always return `True`.
+    """
+
+    # HACK: allow disabling P2P tests using an environment variable
+    disable_p2p_tests = os.getenv("WARP_DISABLE_P2P_TESTS", default="0")
+    if int(disable_p2p_tests):
+        return False
+
+    if sys.platform == "linux":
+        # IOMMU enablement can affect peer-to-peer transfers.
+        # On modern Linux, there should be IOMMU-related entries in the /sys file system.
+        # This should be more reliable than checking kernel logs like dmesg.
+        if os.path.isdir("/sys/class/iommu") and os.listdir("/sys/class/iommu"):
+            return False
+        if os.path.isdir("/sys/kernel/iommu_groups") and os.listdir("/sys/kernel/iommu_groups"):
+            return False
+
+    return True
+
+
+class TimingResult:
+    """Timing result for a single activity."""
+
+    def __init__(self, device, name, filter, elapsed):
+        self.device: warp._src.context.Device = device
+        """The device where the activity was recorded."""
+
+        self.name: str = name
+        """The activity name."""
+
+        self.filter: int = filter
+        """The type of activity (e.g., ``warp.TIMING_KERNEL``)."""
+
+        self.elapsed: float = elapsed
+        """The elapsed time in milliseconds."""
+
+
+def timing_begin(cuda_filter: int = TIMING_ALL, synchronize: bool = True) -> None:
+    """Begin detailed activity timing.
+
+    Parameters:
+        cuda_filter: Filter flags for CUDA activity timing, e.g. ``warp.TIMING_KERNEL`` or ``warp.TIMING_ALL``
+        synchronize: Whether to synchronize all CUDA devices before timing starts
+    """
+
+    if synchronize:
+        warp.synchronize()
+
+    warp._src.context.runtime.core.wp_cuda_timing_begin(cuda_filter)
+
+
+def timing_end(synchronize: bool = True) -> list[TimingResult]:
+    """End detailed activity timing.
+
+    Parameters:
+        synchronize: Whether to synchronize all CUDA devices before timing ends
+
+    Returns:
+        A list of :class:`TimingResult` objects for all recorded activities.
+    """
+
+    if synchronize:
+        warp.synchronize()
+
+    # get result count
+    count = warp._src.context.runtime.core.wp_cuda_timing_get_result_count()
+
+    # get result array from C++
+    result_buffer = (timing_result_t * count)()
+    warp._src.context.runtime.core.wp_cuda_timing_end(result_buffer, count)
+
+    # prepare Python result list
+    results = []
+    for r in result_buffer:
+        device = warp._src.context.runtime.context_map.get(r.context)
+        filter = r.flag
+        elapsed = r.elapsed
+
+        name = r.name.decode()
+        if filter == TIMING_KERNEL:
+            if name.endswith("forward"):
+                # strip trailing "_cuda_kernel_forward"
+                name = f"forward kernel {name.removesuffix('_cuda_kernel_forward')}"
+            else:
+                # strip trailing "_cuda_kernel_backward"
+                name = f"backward kernel {name.removesuffix('_cuda_kernel_backward')}"
+        elif filter == TIMING_KERNEL_BUILTIN:
+            if name.startswith("wp::"):
+                name = f"builtin kernel {name.removeprefix('wp::')}"
+            else:
+                name = f"builtin kernel {name}"
+
+        results.append(TimingResult(device, name, filter, elapsed))
+
+    return results
+
+
+def timing_print(results: list[TimingResult], indent: str = "") -> None:
+    """Print timing results.
+
+    Parameters:
+        results: List of :class:`TimingResult` objects to print.
+        indent: Optional indentation to prepend to all output lines.
+    """
+
+    if not results:
+        print("No activity")
+        return
+
+    class Aggregate:
+        def __init__(self, count=0, elapsed=0):
+            self.count = count
+            self.elapsed = elapsed
+
+    device_totals = {}
+    activity_totals = {}
+
+    max_name_len = len("Activity")
+    for r in results:
+        name_len = len(r.name)
+        max_name_len = max(max_name_len, name_len)
+
+    activity_width = max_name_len + 1
+    activity_dashes = "-" * activity_width
+
+    print(f"{indent}CUDA timeline:")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    print(f"{indent}Time            | Device  | Activity")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    for r in results:
+        device_agg = device_totals.get(r.device.alias)
+        if device_agg is None:
+            device_totals[r.device.alias] = Aggregate(count=1, elapsed=r.elapsed)
+        else:
+            device_agg.count += 1
+            device_agg.elapsed += r.elapsed
+
+        activity_agg = activity_totals.get(r.name)
+        if activity_agg is None:
+            activity_totals[r.name] = Aggregate(count=1, elapsed=r.elapsed)
+        else:
+            activity_agg.count += 1
+            activity_agg.elapsed += r.elapsed
+
+        print(f"{indent}{r.elapsed:12.6f} ms | {r.device.alias:7s} | {r.name}")
+
+    print()
+    print(f"{indent}CUDA activity summary:")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    print(f"{indent}Total time      | Count   | Activity")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    for name, agg in activity_totals.items():
+        print(f"{indent}{agg.elapsed:12.6f} ms | {agg.count:7d} | {name}")
+
+    print()
+    print(f"{indent}CUDA device summary:")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    print(f"{indent}Total time      | Count   | Device")
+    print(f"{indent}----------------+---------+{activity_dashes}")
+    for device, agg in device_totals.items():
+        print(f"{indent}{agg.elapsed:12.6f} ms | {agg.count:7d} | {device}")
+
+
+class ScopedMemoryTracker:
+    """Context manager that tracks memory allocations across all devices.
+
+    Tracking is performed in the C++ native layer by intercepting all
+    ``wp_alloc_*`` / ``wp_free_*`` calls, so both Python-originated and
+    C++ internal allocations (BVH, HashGrid, etc.) are captured.  C++
+    allocations are labeled with the originating subsystem (e.g.
+    ``(native:bvh)``), while Python allocations include the call-site
+    file, line, and function name.
+
+    Scope stacks are thread-local, while allocation totals and reports are
+    global.  When tracking allocations from worker threads, prefer enabling
+    tracking before starting the workers.
+
+    Args:
+        name: Scope name for grouping allocations.  Nested trackers form a
+            hierarchical scope path, e.g. ``"simulation/collision"``.
+        active: If ``False``, the tracker becomes a no-op.  This allows
+            keeping tracker calls in the code and toggling them without
+            changing the call sites.
+        print: If ``True`` (the default), print an allocation summary
+            on exit.
+        report_func: Optional callback ``(str) -> None`` for custom report
+            handling.  When set, the report text is passed to this function
+            instead of being printed to ``sys.stdout``.
+
+    Example:
+        .. code-block:: python
+
+            with wp.ScopedMemoryTracker("my_scope") as tracker:
+                a = wp.zeros(1000, dtype=wp.float32, device="cpu")
+                b = wp.zeros(1000, dtype=wp.float32, device="cuda:0")
+            # prints allocation summary automatically
+
+    See Also:
+        :attr:`warp.config.track_memory`
+    """
+
+    def __init__(
+        self,
+        name: str = "root",
+        active: bool = True,
+        print: bool = True,
+        report_func: Callable[[str], None] | None = None,
+    ):
+        self.name = name
+        self.active = active
+        self.print = print
+        self.report_func = report_func
+        self._did_enable = False
+
+    def __enter__(self):
+        if not self.active:
+            return self
+
+        wp.init()
+        from warp._src.context import runtime  # noqa: PLC0415
+
+        runtime.core.wp_alloc_tracker_push_scope(self.name.encode())
+        if not runtime.core.wp_alloc_tracker_is_enabled():
+            runtime.core.wp_alloc_tracker_enable(1)
+            self._did_enable = True
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if not self.active:
+            return
+
+        from warp._src.context import runtime  # noqa: PLC0415
+
+        runtime.core.wp_alloc_tracker_pop_scope()
+        try:
+            if self.print:
+                self.report()
+        finally:
+            if self._did_enable:
+                runtime.core.wp_alloc_tracker_enable(0)
+
+    def report(self, file=None, sort="size", max_items=10):
+        """Print an allocation report.
+
+        Can be called multiple times -- each call reflects the current state.
+        Concurrent calls produce serialized snapshots of the global tracker
+        state.
+
+        Args:
+            file: File object to write to (defaults to ``sys.stdout``).
+            sort: Sort order for live allocations: ``"size"`` (default, largest
+                first) or ``"chronological"`` (oldest first).
+            max_items: Maximum number of individual allocations shown per
+                category (default ``10``).
+
+        Raises:
+            ValueError: If ``sort`` is not ``"size"`` or ``"chronological"``.
+        """
+        if sort not in ("size", "chronological"):
+            raise ValueError(f"Invalid sort order {sort!r}; expected 'size' or 'chronological'")
+
+        sort_order = 1 if sort == "chronological" else 0
+        text = warp._src.context.alloc_tracker_report_text(sort_order, max_items)
+        if text:
+            if self.report_func is not None:
+                self.report_func(text)
+            else:
+                print(text, file=file or sys.stdout, end="")
+
+    def clear(self):
+        """Reset all tracking data while keeping the tracker active.
+
+        After calling this, subsequent :meth:`report` calls only reflect
+        allocations that occurred after the reset.
+        """
+        from warp._src.context import runtime  # noqa: PLC0415
+
+        runtime.core.wp_alloc_tracker_reset()
+
+
+# register API functions so they appear in the documentation
+
+context.register_api_function(
+    quat_between_vectors,
+    module="warp",
+)

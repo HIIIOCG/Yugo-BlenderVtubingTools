@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdTestRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Test",
+                        "priority": 99
+                    }
+                }
+            },
+            "LibraryPath": "../../usdrt.hydra.usd_writer.dll",
+            "Name": "hdTest",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

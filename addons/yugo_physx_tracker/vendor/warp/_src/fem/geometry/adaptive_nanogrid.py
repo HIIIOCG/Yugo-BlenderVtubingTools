@@ -1,0 +1,1220 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from collections.abc import Sequence
+from typing import Any, ClassVar
+
+import warp as wp
+from warp._src.fem import cache, utils
+from warp._src.fem.cache import cached_vec_type
+from warp._src.fem.types import OUTSIDE, ElementIndex, make_coords, make_free_sample
+from warp._src.logger import log_warning
+
+from .geometry import Geometry
+from .nanogrid import (
+    NanogridBase,
+    _environment_transform_args,
+    _fill_cell_env_from_points,
+    _initialize_environment_bounds,
+    _nanogrid_optional_int_array,
+    _normalize_environment_voxels,
+    _normalize_flat_environment_offsets,
+    _world_point_cell_ijk,
+)
+
+_FACE_LEVEL_BIT = wp.constant(wp.uint8(4))  # follows nanogrid.FACE_OUTER_OFFSET_BIT
+_GRID_LEVEL_BIT = wp.constant(wp.int32(19))  # follows nanogrid.GRID_AXIS_FLAG
+
+
+def _make_adaptive_cell_arg(scalar_type):
+    mat33_type = cache.cached_mat_type((3, 3), scalar_type)
+
+    @cache.dynamic_struct(suffix=scalar_type)
+    class AdaptiveNanogridCellArg:
+        cell_grid: wp.uint64
+        cell_ijk: wp.array(dtype=wp.vec3i)
+        cell_env: wp.array(dtype=int)
+        env_offsets: wp.array(dtype=wp.vec3i)
+        cell_level: wp.array(dtype=wp.uint8)
+        inverse_transform: mat33_type
+        cell_volume: scalar_type
+        level_count: int
+
+    return AdaptiveNanogridCellArg
+
+
+def _make_adaptive_side_arg(cell_arg_type, scalar_type):
+    vec3_type = cached_vec_type(3, scalar_type)
+
+    @cache.dynamic_struct(suffix=scalar_type)
+    class AdaptiveNanogridSideArg:
+        cell_arg: cell_arg_type
+        face_ijk: wp.array(dtype=wp.vec3i)
+        face_env: wp.array(dtype=int)
+        face_cell_indices: wp.array(dtype=wp.vec2i)
+        face_flags: wp.array(dtype=wp.uint8)
+        face_areas: vec3_type
+
+    return AdaptiveNanogridSideArg
+
+
+class AdaptiveNanogrid(NanogridBase):
+    """Adaptive sparse grid."""
+
+    dimension = 3
+
+    _dynamic_attribute_constructors: ClassVar = {
+        # Functions that capture face_tangent_vecs (itself dynamic)
+        "side_deformation_gradient": lambda obj: obj._make_side_deformation_gradient(),
+        "side_normal": lambda obj: obj._make_side_normal(),
+        **Geometry._dynamic_attribute_constructors,
+    }
+
+    @classmethod
+    def from_environment_voxels(
+        cls,
+        points: wp.array | Sequence[wp.array] | None = None,
+        cell_levels: wp.array | Sequence[wp.array] | None = None,
+        point_envs: wp.array | int | None = None,
+        env_count: int | wp.array | Sequence[Sequence[int]] | None = None,
+        level_count: int | None = None,
+        env_offsets: wp.array | Sequence[Sequence[int]] | None = None,
+        *,
+        point_mask: wp.array | None = None,
+        voxel_size: int | float | Sequence[float] | None = 1.0,
+        translation=(0.0, 0.0, 0.0),
+        transform=None,
+        temporary_store: cache.TemporaryStore | None = None,
+        scalar_type: type = wp.float32,
+        device=None,
+        cell_ijks: Sequence[wp.array] | None = None,
+    ):
+        """Construct an adaptive sparse grid from environment-tagged active cells and levels.
+
+        Coordinates and levels are interpreted in environment-local fine-grid index
+        space. The helper packs all environments into one NanoVDB index grid and
+        returns a geometry whose FEM world coordinates remain local to each
+        environment.
+
+        Args:
+            points: Flat ``wp.vec3i`` or ``wp.vec3f`` array of active cell points.
+                Deprecated: a sequence of per-environment ``wp.vec3i`` arrays is also accepted for compatibility.
+            cell_levels: Flat ``wp.uint8`` array with one refinement level per point.
+                Deprecated: a sequence of per-environment ``wp.uint8`` arrays matching ``points`` is also accepted for
+                compatibility.
+            point_envs: Flat ``int32`` array with one environment index per point. Entries for unmasked points must
+                satisfy ``0 <= env < env_count``.
+            env_count: Number of environments represented by ``point_envs``.
+            level_count: Number of refinement levels in the grid.
+            env_offsets: Optional packed-grid offsets, one ``wp.vec3i`` per environment.
+                Offsets must be aligned to the coarsest cell size. If omitted,
+                aligned offsets are generated along the x axis. Custom offsets are an
+                advanced override for callers that need deterministic packed NanoVDB
+                coordinates, for example to match an externally built volume. They
+                must still keep active cells from different environments from sharing
+                packed-grid faces.
+            point_mask: Optional ``int32`` array with one entry per point. Points with a zero mask value are ignored.
+            voxel_size: Fine-grid voxel size for the packed NanoVDB volume. Ignored if ``transform`` is provided.
+            translation: Translation between packed index and world spaces.
+            transform: Linear transform between packed index and world spaces.
+            temporary_store: Shared pool from which to allocate temporary arrays.
+            scalar_type: Scalar type for grid coordinates (``wp.float32`` or ``wp.float64``).
+            device: CUDA device on which to build the packed volume.
+            cell_ijks: Deprecated keyword alias for the old per-environment ``points`` sequence form.
+        """
+
+        if cell_ijks is not None:
+            if points is not None:
+                raise TypeError("points and cell_ijks cannot both be provided")
+            points = cell_ijks
+        if points is None:
+            raise TypeError("points is required")
+        if cell_levels is None:
+            raise TypeError("cell_levels is required")
+
+        if not isinstance(points, wp.array):
+            points, cell_levels, point_envs, env_count, level_count, env_offsets = (
+                _adaptive_environment_voxels_from_legacy_sequence(
+                    points, cell_levels, point_envs, env_count, level_count, env_offsets, device
+                )
+            )
+        if env_count is None:
+            raise TypeError("env_count is required")
+        if level_count is None:
+            raise TypeError("level_count is required")
+
+        cell_grid, cell_level, cell_env, env_offsets = _make_environment_adaptive_cell_grid(
+            points,
+            cell_levels,
+            point_envs,
+            env_count,
+            level_count=level_count,
+            env_offsets=env_offsets,
+            point_mask=point_mask,
+            voxel_size=voxel_size,
+            translation=translation,
+            transform=transform,
+            temporary_store=temporary_store,
+            device=device,
+        )
+        return cls(
+            cell_grid,
+            cell_level=cell_level,
+            level_count=level_count,
+            temporary_store=temporary_store,
+            scalar_type=scalar_type,
+            cell_env=cell_env,
+            env_offsets=env_offsets,
+        )
+
+    def __init__(
+        self,
+        cell_grid: wp.Volume,
+        cell_level: wp.array,
+        level_count: int,
+        temporary_store: cache.TemporaryStore,
+        scalar_type: type = wp.float32,
+        cell_env: wp.array | None = None,
+        env_offsets: wp.array | None = None,
+    ):
+        """Construct an adaptive sparse grid geometry from an in-memory NanoVDB volume and a list of levels.
+
+        It is not recommended to use this constructor directly; see the helper functions
+        :func:`warp.fem.adaptive_nanogrid_from_field` and :func:`warp.fem.adaptive_nanogrid_from_hierarchy`.
+
+        Args:
+            cell_grid: A warp volume (ideally backed by an index grid) whose voxels coordinates correspond to the lowest fine-resolution voxel of each cell.
+              The cell's extent is then given by the ``cell_level`` array. For instance, a voxel at coordinates ``ijk`` and level ``0`` corresponds to a fine cell at the same coordinates,
+              a voxel at coordinates ``2*ijk`` and level ``1`` corresponds to a cell spanning ``2^3`` voxels from ``2*ijk`` to ``2*ijk + (1,1,1)``, etc.
+            cell_level: Refinement level for each voxel of the volume. Level 0 is the finest, level ``level_count-1`` is the coarsest.
+            level_count: Number of levels in the grid
+            scalar_type: Scalar type for coordinate and weight computations (``wp.float32`` or ``wp.float64``)
+        """
+
+        if level_count > 8:
+            raise ValueError("Too many refinement levels, max 8 supported")
+
+        self.level_count = level_count
+        self._cell_level = cell_level
+
+        device = cell_grid.device
+        cell_count = cell_grid.get_voxel_count()
+        if cell_count == 0:
+            raise ValueError("Adaptive Nanogrid requires at least one active cell")
+
+        cell_ijk = wp.array(dtype=wp.vec3i, shape=(cell_count,), device=device)
+        cell_grid.get_voxels(out=cell_ijk)
+
+        node_grid = _build_node_grid(cell_ijk, cell_level, cell_grid, temporary_store)
+        node_count = node_grid.get_voxel_count()
+        node_ijk = wp.array(shape=(node_count,), dtype=wp.vec3i, device=device)
+        node_grid.get_voxels(out=node_ijk)
+
+        super().__init__(
+            cell_grid,
+            cell_ijk,
+            node_grid,
+            node_ijk,
+            scalar_type=scalar_type,
+            cell_env=cell_env,
+            env_offsets=env_offsets,
+        )
+
+        self._stacked_edge_grid = None
+        self._stacked_edge_count = 0
+        self._stacked_face_grid = None
+        self._stacked_face_count = 0
+
+        self.CellArg = _make_adaptive_cell_arg(scalar_type)
+        self.SideArg = _make_adaptive_side_arg(self.CellArg, scalar_type)
+
+        cache.setup_dynamic_attributes(self)
+
+    @property
+    def stacked_face_grid(self) -> wp.Volume:
+        self._ensure_stacked_face_grid()
+        return self._stacked_face_grid
+
+    def stacked_face_count(self):
+        self._ensure_stacked_face_grid()
+        return self._stacked_face_count
+
+    @property
+    def stacked_edge_grid(self) -> wp.Volume:
+        self._ensure_stacked_edge_grid()
+        return self._stacked_edge_grid
+
+    def stacked_edge_count(self):
+        self._ensure_stacked_edge_grid()
+        return self._stacked_edge_count
+
+    def fill_cell_arg(self, arg, device):
+        arg.cell_grid = self._cell_grid.id
+        arg.cell_ijk = self._cell_ijk
+        arg.cell_env = self._cell_env
+        arg.env_offsets = self._env_offsets
+        arg.cell_level = self._cell_level
+        arg.inverse_transform = self._inverse_transform
+        arg.cell_volume = self._cell_volume
+        arg.level_count = self.level_count
+
+    def fill_side_arg(self, arg, device):
+        self._ensure_face_grid()
+        self.fill_cell_arg(arg.cell_arg, device)
+        arg.face_ijk = self._face_ijk.to(device)
+        arg.face_env = self._face_env.to(device)
+        arg.face_flags = self._face_flags.to(device)
+        arg.face_cell_indices = self._face_cell_indices.to(device)
+        arg.face_areas = self._face_areas
+
+    def supports_cell_lookup(self, device):
+        return True
+
+    # -- Dynamic function constructors --
+
+    @wp.func
+    def cell_position(args: Any, s: Any):
+        scale = s.element_coords.dtype(1 << int(args.cell_level[s.element_index]))
+        uvw = (
+            type(s.element_coords)(NanogridBase._local_cell_ijk(args, s.element_index))
+            + s.element_coords * scale
+            - type(s.element_coords)(s.element_coords.dtype(0.5))
+        )
+        return wp.volume_index_to_world(args.cell_grid, uvw)
+
+    @wp.func
+    def cell_deformation_gradient(args: Any, s: Any):
+        scale = s.element_coords.dtype(1 << int(args.cell_level[s.element_index]))
+        return wp.inverse(args.inverse_transform) * scale
+
+    @wp.func
+    def cell_inverse_deformation_gradient(args: Any, s: Any):
+        scale = s.element_coords.dtype(1 << int(args.cell_level[s.element_index]))
+        return args.inverse_transform / scale
+
+    @wp.func
+    def cell_measure(args: Any, s: Any):
+        scale = s.element_coords.dtype(1 << int(args.cell_level[s.element_index]))
+        return args.cell_volume * scale * scale * scale
+
+    @wp.func
+    def cell_normal(args: Any, s: Any):
+        return type(s.element_coords)(s.element_coords.dtype(0.0))
+
+    @wp.func
+    def _lookup_cell_index(args: Any, i: int, j: int, k: int):
+        return AdaptiveNanogrid.find_cell(args.cell_grid, wp.vec3i(i, j, k), args.level_count, args.cell_level)
+
+    @wp.func
+    def _cell_coordinates_local(args: Any, cell_index: int, uvw: Any):
+        ijk = type(uvw)(NanogridBase._local_cell_ijk(args, cell_index))
+        rel_pos = uvw - ijk
+        scale = uvw.dtype(1 << int(args.cell_level[cell_index]))
+        return rel_pos / scale
+
+    @wp.func
+    def _cell_closest_point_local(args: Any, cell_index: int, uvw: Any):
+        ijk = type(uvw)(NanogridBase._local_cell_ijk(args, cell_index))
+        rel_pos = uvw - ijk
+        scale = uvw.dtype(1 << int(args.cell_level[cell_index]))
+        coords = wp.min(wp.max(rel_pos / scale, type(uvw)(uvw.dtype(0.0))), type(uvw)(uvw.dtype(1.0)))
+        return wp.length_sq(wp.volume_index_to_world_dir(args.cell_grid, coords * scale - rel_pos)), coords
+
+    @wp.func
+    def cell_coordinates(args: Any, cell_index: int, pos: Any):
+        uvw = wp.volume_world_to_index(args.cell_grid, pos) + type(pos)(pos.dtype(0.5))
+        return AdaptiveNanogrid._cell_coordinates_local(args, cell_index, uvw)
+
+    @wp.func
+    def cell_closest_point(args: Any, cell_index: int, pos: Any):
+        uvw = wp.volume_world_to_index(args.cell_grid, pos) + type(pos)(pos.dtype(0.5))
+        dist, coords = AdaptiveNanogrid._cell_closest_point_local(args, cell_index, uvw)
+        return coords, dist
+
+    @wp.func
+    def side_position(args: Any, s: Any):
+        ijk = NanogridBase._local_face_ijk(args, s.element_index)
+        flags = args.face_flags[s.element_index]
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+        scale = s.element_coords.dtype(1 << _get_face_level(flags))
+
+        uvw = type(s.element_coords)(ijk) + scale * NanogridBase._side_to_cell_coords(
+            axis, flip, s.element_coords.dtype(0.0), s.element_coords
+        )
+        return wp.volume_index_to_world(
+            args.cell_arg.cell_grid, uvw - type(s.element_coords)(s.element_coords.dtype(0.5))
+        )
+
+    def _make_side_deformation_gradient(self):
+        SampleType = self.sample_type
+        scalar = self._scalar_type
+        face_tangent_vecs = self._make_face_tangent_vecs()
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_deformation_gradient(args: self.SideArg, s: SampleType):
+            flags = args.face_flags[s.element_index]
+            axis = NanogridBase._get_face_axis(flags)
+            flip = NanogridBase._get_face_inner_offset(flags)
+            scale = scalar(1 << _get_face_level(flags))
+            v1, v2 = face_tangent_vecs(args.cell_arg.cell_grid, axis, flip)
+            return wp.matrix_from_cols(v1, v2) * scale
+
+        return side_deformation_gradient
+
+    @wp.func
+    def side_inner_inverse_deformation_gradient(args: Any, s: Any):
+        s_cell = make_free_sample(
+            AdaptiveNanogrid.side_inner_cell_index(args, s.element_index), type(s.element_coords)()
+        )
+        return AdaptiveNanogrid.cell_inverse_deformation_gradient(args.cell_arg, s_cell)
+
+    @wp.func
+    def side_outer_inverse_deformation_gradient(args: Any, s: Any):
+        s_cell = make_free_sample(
+            AdaptiveNanogrid.side_outer_cell_index(args, s.element_index), type(s.element_coords)()
+        )
+        return AdaptiveNanogrid.cell_inverse_deformation_gradient(args.cell_arg, s_cell)
+
+    @wp.func
+    def side_measure(args: Any, s: Any):
+        flags = args.face_flags[s.element_index]
+        axis = NanogridBase._get_face_axis(flags)
+        scale = s.element_coords.dtype(1 << _get_face_level(flags))
+        return args.face_areas[axis] * scale * scale
+
+    @wp.func
+    def side_measure_ratio(args: Any, s: Any):
+        flags = args.face_flags[s.element_index]
+        axis = NanogridBase._get_face_axis(flags)
+        scale = s.element_coords.dtype(1 << _get_face_level(flags))
+        return args.face_areas[axis] / (args.cell_arg.cell_volume * scale)
+
+    def _make_side_normal(self):
+        SampleType = self.sample_type
+        face_tangent_vecs = self._make_face_tangent_vecs()
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_normal(args: self.SideArg, s: SampleType):
+            flags = args.face_flags[s.element_index]
+            axis = NanogridBase._get_face_axis(flags)
+            flip = NanogridBase._get_face_inner_offset(flags)
+            v1, v2 = face_tangent_vecs(args.cell_arg.cell_grid, axis, flip)
+            return wp.cross(v1, v2) / args.face_areas[axis]
+
+        return side_normal
+
+    @wp.func
+    def side_inner_cell_index(args: Any, side_index: ElementIndex):
+        return args.face_cell_indices[side_index][0]
+
+    @wp.func
+    def side_outer_cell_index(args: Any, side_index: ElementIndex):
+        return args.face_cell_indices[side_index][1]
+
+    @wp.func
+    def side_inner_cell_coords(args: Any, side_index: ElementIndex, side_coords: Any):
+        flags = args.face_flags[side_index]
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+        offset = NanogridBase._get_face_inner_offset(flags)
+
+        same_level_cell_coords = NanogridBase._side_to_cell_coords(
+            axis, flip, side_coords.dtype(1.0) - side_coords.dtype(offset), side_coords
+        )
+        same_level_cell_ijk = args.face_ijk[side_index]
+        side_level = _get_face_level(flags)
+        same_level_cell_ijk[axis] += (offset - 1) << side_level
+
+        cell_index = AdaptiveNanogrid.side_inner_cell_index(args, side_index)
+        cell_level = int(args.cell_arg.cell_level[cell_index])
+        cell_ijk = args.cell_arg.cell_ijk[cell_index]
+
+        return _coarse_cell_coords(same_level_cell_ijk, side_level, same_level_cell_coords, cell_ijk, cell_level)
+
+    @wp.func
+    def side_outer_cell_coords(args: Any, side_index: ElementIndex, side_coords: Any):
+        flags = args.face_flags[side_index]
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+        offset = NanogridBase._get_face_outer_offset(flags)
+
+        same_level_cell_coords = NanogridBase._side_to_cell_coords(axis, flip, side_coords.dtype(offset), side_coords)
+        same_level_cell_ijk = args.face_ijk[side_index]
+        side_level = _get_face_level(flags)
+        same_level_cell_ijk[axis] -= offset << side_level
+
+        cell_index = AdaptiveNanogrid.side_outer_cell_index(args, side_index)
+        cell_level = int(args.cell_arg.cell_level[cell_index])
+        cell_ijk = args.cell_arg.cell_ijk[cell_index]
+
+        return _coarse_cell_coords(same_level_cell_ijk, side_level, same_level_cell_coords, cell_ijk, cell_level)
+
+    @wp.func
+    def side_from_cell_coords(args: Any, side_index: ElementIndex, element_index: ElementIndex, element_coords: Any):
+        flags = args.face_flags[side_index]
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+        side_level = _get_face_level(flags)
+        cell_level = int(args.cell_arg.cell_level[element_index])
+
+        cell_ijk = args.cell_arg.cell_ijk[element_index]
+        side_ijk = args.face_ijk[side_index]
+
+        same_level_cell_coords = _coarse_cell_coords(cell_ijk, cell_level, element_coords, side_ijk, side_level)
+
+        same_env = NanogridBase.side_environment_index(args, side_index) == NanogridBase.cell_environment_index(
+            args.cell_arg, element_index
+        )
+        on_side = (
+            same_env
+            and same_level_cell_coords[axis] == element_coords.dtype(0.0)
+            and wp.min(same_level_cell_coords) >= element_coords.dtype(0.0)
+            and wp.max(same_level_cell_coords) <= element_coords.dtype(1.0)
+        )
+
+        return wp.where(
+            on_side,
+            NanogridBase._cell_to_side_coords(axis, flip, same_level_cell_coords),
+            type(element_coords)(element_coords.dtype(OUTSIDE)),
+        )
+
+    @wp.func
+    def side_to_cell_arg(side_arg: Any):
+        return side_arg.cell_arg
+
+    @wp.func
+    def side_coordinates(args: Any, side_index: int, pos: Any):
+        ijk = NanogridBase._local_face_ijk(args, side_index)
+        fine_cell_coords = (
+            wp.volume_world_to_index(args.cell_arg.cell_grid, pos) + type(pos)(pos.dtype(0.5)) - type(pos)(ijk)
+        )
+
+        flags = args.face_flags[side_index]
+        side_level = _get_face_level(flags)
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+
+        return NanogridBase._cell_to_side_coords(axis, flip, fine_cell_coords / pos.dtype(1 << side_level))
+
+    @wp.func
+    def side_closest_point(args: Any, side_index: int, pos: Any):
+        coords = AdaptiveNanogrid.side_coordinates(args, side_index, pos)
+        z = pos.dtype(0.0)
+        o = pos.dtype(1.0)
+        proj_coords = make_coords(wp.clamp(coords[0], z, o), wp.clamp(coords[1], z, o))
+
+        flags = args.face_flags[side_index]
+        axis = NanogridBase._get_face_axis(flags)
+        flip = NanogridBase._get_face_inner_offset(flags)
+        side_level = _get_face_level(flags)
+        cell_coord_offset = NanogridBase._side_to_cell_coords(axis, flip, z, coords - proj_coords) * coords.dtype(
+            1 << side_level
+        )
+
+        return proj_coords, wp.length_sq(wp.volume_index_to_world_dir(args.cell_arg.cell_grid, cell_coord_offset))
+
+    # -- Topology building --
+
+    def _build_face_grid(self, temporary_store: cache.TemporaryStore | None = None):
+        device = self._cell_grid.device
+
+        cell_face_grid = _build_cell_face_grid(self._cell_ijk, self._cell_level, self._cell_grid, temporary_store)
+
+        self._face_grid = _build_completed_face_grid(
+            cell_face_grid, self._cell_grid, self.level_count, self._cell_level, temporary_store
+        )
+
+        face_count = self._face_grid.get_voxel_count()
+        self._face_ijk = wp.array(shape=(face_count,), dtype=wp.vec3i, device=device)
+        self._face_grid.get_voxels(out=self._face_ijk)
+
+        self._face_cell_indices = wp.array(shape=(face_count,), dtype=wp.vec2i, device=device)
+        self._face_env = wp.array(shape=(face_count,), dtype=int, device=device)
+        self._face_flags = wp.array(shape=(face_count,), dtype=wp.uint8, device=device)
+        boundary_face_mask = cache.borrow_temporary(temporary_store, shape=(face_count,), dtype=wp.int32, device=device)
+
+        wp.launch(
+            _build_face_indices_and_flags,
+            dim=face_count,
+            device=device,
+            inputs=[
+                self._cell_grid.id,
+                self.level_count,
+                self._cell_level,
+                self._cell_env,
+                self._face_ijk,
+                self._face_cell_indices,
+                self._face_env,
+                self._face_flags,
+                boundary_face_mask,
+            ],
+        )
+        boundary_face_indices, _ = utils.masked_indices(boundary_face_mask)
+        boundary_face_mask.release()
+        self._boundary_face_indices = boundary_face_indices.detach()
+
+    def _ensure_stacked_edge_grid(self):
+        if self._stacked_edge_grid is None:
+            self._stacked_edge_grid = _build_stacked_edge_grid(
+                self._cell_ijk, self._cell_level, self._cell_grid, temporary_store=None
+            )
+            self._stacked_edge_count = self._stacked_edge_grid.get_voxel_count()
+
+    def _ensure_stacked_face_grid(self):
+        if self._stacked_face_grid is None:
+            self._stacked_face_grid = _build_stacked_face_grid(
+                self._cell_ijk, self._cell_level, self._cell_grid, temporary_store=None
+            )
+            self._stacked_face_count = self._stacked_face_grid.get_voxel_count()
+
+    # -- Static helper functions (integer-only or used by kernels) --
+
+    @wp.func
+    def coarse_ijk(ijk: wp.vec3i, level: int):
+        return wp.vec3i(ijk[0] >> level, ijk[1] >> level, ijk[2] >> level)
+
+    @wp.func
+    def fine_ijk(ijk: wp.vec3i, level: int):
+        return wp.vec3i(ijk[0] << level, ijk[1] << level, ijk[2] << level)
+
+    @wp.func
+    def encode_axis_and_level(ijk: wp.vec3i, axis: int, level: int):
+        for ax in range(3):
+            coord = ijk[ax]
+            level_flag = ((level >> ax) & 1) << _GRID_LEVEL_BIT
+            ijk[ax] = wp.where(coord < 0, coord & ~level_flag, coord | level_flag)
+
+        return NanogridBase._add_axis_flag(ijk, axis)
+
+    @wp.func
+    def find_cell(
+        cell_grid: wp.uint64,
+        ijk: wp.vec3i,
+        level_count: int,
+        cell_level: wp.array(dtype=wp.uint8),
+    ):
+        for l in range(level_count):
+            mask = ~((1 << l) - 1)
+            cell_index = wp.volume_lookup_index(cell_grid, ijk[0] & mask, ijk[1] & mask, ijk[2] & mask)
+            if cell_index != -1:
+                if int(cell_level[cell_index]) >= l:
+                    return cell_index
+
+        return -1
+
+
+def _normalize_environment_levels(points: wp.array, cell_levels: wp.array, device):
+    if (
+        not isinstance(cell_levels, wp.array)
+        or cell_levels.dtype != wp.uint8
+        or cell_levels.ndim != 1
+        or not cell_levels.is_contiguous
+    ):
+        raise RuntimeError("cell_levels must be a contiguous 1D Warp array with dtype uint8")
+    if cell_levels.shape[0] < points.shape[0]:
+        raise RuntimeError(f"cell_levels must have at least {points.shape[0]} entries")
+    if cell_levels.device != device:
+        cell_levels = cell_levels.to(device)
+    return cell_levels
+
+
+def _adaptive_environment_voxels_from_legacy_sequence(
+    cell_ijks: Sequence[wp.array],
+    cell_levels: Sequence[wp.array],
+    legacy_level_count,
+    legacy_env_offsets,
+    level_count: int | None,
+    env_offsets: wp.array | Sequence[Sequence[int]] | None,
+    device,
+):
+    log_warning(
+        "The sequence form AdaptiveNanogrid.from_environment_voxels(cell_ijks, cell_levels, level_count=..., "
+        "env_offsets=...) is deprecated; pass flat points, cell_levels, point_envs, and env_count instead.",
+        category=DeprecationWarning,
+        stacklevel=2,
+    )
+
+    if level_count is None:
+        if legacy_level_count is None:
+            raise TypeError("level_count is required with the deprecated cell_ijks sequence form")
+        try:
+            level_count = int(legacy_level_count)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("level_count must be an integer with the deprecated cell_ijks sequence form") from exc
+    elif legacy_level_count is not None:
+        raise TypeError("point_envs is not accepted with the deprecated cell_ijks sequence form")
+
+    if legacy_env_offsets is not None:
+        if isinstance(legacy_env_offsets, int):
+            raise TypeError("env_count is not accepted with the deprecated cell_ijks sequence form")
+        if env_offsets is not None:
+            raise TypeError("env_offsets was provided both positionally and by keyword")
+        env_offsets = legacy_env_offsets
+
+    cell_ijks = tuple(cell_ijks)
+    cell_levels = tuple(cell_levels)
+    if not cell_ijks:
+        raise ValueError("At least one environment cell array is required")
+    if len(cell_ijks) != len(cell_levels):
+        raise ValueError("cell_ijks and cell_levels must have matching environment counts")
+
+    if device is None:
+        if not isinstance(cell_ijks[0], wp.array):
+            raise ValueError("Environment 0 cell coordinates must be a 1D wp.vec3i array")
+        device = cell_ijks[0].device
+    else:
+        device = wp.get_device(device)
+
+    normalized_cells = []
+    normalized_levels = []
+    point_count = 0
+    for env_index, (env_cell_ijk, env_cell_level) in enumerate(zip(cell_ijks, cell_levels, strict=True)):
+        if not isinstance(env_cell_ijk, wp.array) or env_cell_ijk.dtype != wp.vec3i or env_cell_ijk.ndim != 1:
+            raise ValueError(f"Environment {env_index} cell coordinates must be a 1D wp.vec3i array")
+        if not isinstance(env_cell_level, wp.array) or env_cell_level.dtype != wp.uint8 or env_cell_level.ndim != 1:
+            raise ValueError(f"Environment {env_index} cell levels must be a 1D wp.uint8 array")
+        if env_cell_level.shape[0] != env_cell_ijk.shape[0]:
+            raise ValueError(f"Environment {env_index} cell coordinates and levels must have matching lengths")
+
+        normalized_cell_ijk = env_cell_ijk if env_cell_ijk.device == device else env_cell_ijk.to(device)
+        normalized_cell_level = env_cell_level if env_cell_level.device == device else env_cell_level.to(device)
+        normalized_cells.append(normalized_cell_ijk)
+        normalized_levels.append(normalized_cell_level)
+        point_count += normalized_cell_ijk.shape[0]
+
+    points = wp.empty(shape=point_count, dtype=wp.vec3i, device=device)
+    flat_levels = wp.empty(shape=point_count, dtype=wp.uint8, device=device)
+    point_envs = wp.empty(shape=point_count, dtype=wp.int32, device=device)
+
+    point_offset = 0
+    for env_index, (env_cell_ijk, env_cell_level) in enumerate(zip(normalized_cells, normalized_levels, strict=True)):
+        env_point_count = env_cell_ijk.shape[0]
+        if env_point_count:
+            wp.copy(points, env_cell_ijk, dest_offset=point_offset, count=env_point_count)
+            wp.copy(flat_levels, env_cell_level, dest_offset=point_offset, count=env_point_count)
+            point_envs[point_offset : point_offset + env_point_count].fill_(env_index)
+        point_offset += env_point_count
+
+    return points, flat_levels, point_envs, len(normalized_cells), level_count, env_offsets
+
+
+def _make_environment_adaptive_cell_grid(
+    points: wp.array,
+    cell_levels: wp.array,
+    point_envs: wp.array,
+    env_count: int,
+    *,
+    level_count: int,
+    env_offsets: wp.array | Sequence[Sequence[int]] | None,
+    point_mask: wp.array | None = None,
+    voxel_size: int | float | Sequence[float] | None = 1.0,
+    translation=(0.0, 0.0, 0.0),
+    transform=None,
+    temporary_store: cache.TemporaryStore | None,
+    device=None,
+):
+    if level_count <= 0 or level_count > 8:
+        raise ValueError("Adaptive Nanogrid level count must be between 1 and 8")
+
+    points, point_envs, env_count, device = _normalize_environment_voxels(points, point_envs, env_count, device)
+    cell_levels = _normalize_environment_levels(points, cell_levels, device)
+    point_count = points.shape[0]
+    point_mask = _nanogrid_optional_int_array(point_mask, point_count, device, "point_mask")
+    _, inverse_transform, translation_vec = _environment_transform_args(voxel_size, translation, transform)
+
+    alignment = 1 << (level_count - 1)
+
+    cell_counts = cache.borrow_temporary(temporary_store, shape=env_count, dtype=int, device=device)
+    min_x = cache.borrow_temporary(temporary_store, shape=env_count, dtype=int, device=device)
+    max_x = cache.borrow_temporary(temporary_store, shape=env_count, dtype=int, device=device)
+
+    wp.launch(_initialize_environment_bounds, dim=env_count, inputs=[cell_counts, min_x, max_x], device=device)
+    if wp.types.types_equal(points.dtype, wp.vec3i):
+        wp.launch(
+            _accumulate_environment_adaptive_bounds_ijk,
+            dim=point_count,
+            device=device,
+            inputs=[points, cell_levels, point_envs, point_mask, cell_counts, min_x, max_x],
+        )
+    else:
+        wp.launch(
+            _accumulate_environment_adaptive_bounds_world,
+            dim=point_count,
+            device=device,
+            inputs=[
+                points,
+                cell_levels,
+                point_envs,
+                point_mask,
+                inverse_transform,
+                translation_vec,
+                cell_counts,
+                min_x,
+                max_x,
+            ],
+        )
+
+    env_offsets = _normalize_flat_environment_offsets(
+        env_offsets,
+        env_count,
+        device,
+        cell_counts=cell_counts,
+        min_x=min_x,
+        max_x=max_x,
+        guard_cells=alignment,
+        alignment=alignment,
+        temporary_store=temporary_store,
+    )
+
+    packed_ijks = cache.borrow_temporary(temporary_store, shape=point_count, dtype=wp.vec3i, device=device)
+    packed_levels = cache.borrow_temporary(temporary_store, shape=point_count, dtype=wp.uint8, device=device)
+    if wp.types.types_equal(points.dtype, wp.vec3i):
+        wp.launch(
+            _pack_environment_adaptive_voxels_ijk,
+            dim=point_count,
+            device=device,
+            inputs=[points, cell_levels, point_envs, point_mask, env_offsets, packed_ijks, packed_levels],
+        )
+    else:
+        wp.launch(
+            _pack_environment_adaptive_voxels_world,
+            dim=point_count,
+            device=device,
+            inputs=[
+                points,
+                cell_levels,
+                point_envs,
+                point_mask,
+                inverse_transform,
+                translation_vec,
+                env_offsets,
+                packed_ijks,
+                packed_levels,
+            ],
+        )
+
+    cell_grid = wp.Volume.allocate_by_voxels(
+        packed_ijks,
+        voxel_size=voxel_size,
+        translation=translation,
+        transform=transform,
+        device=device,
+        point_mask=point_mask,
+    )
+    cell_count = cell_grid.get_voxel_count()
+    cell_level = wp.empty(shape=(cell_count,), dtype=wp.uint8, device=device)
+    cell_env = wp.empty(shape=(cell_count,), dtype=int, device=device)
+
+    _fill_cell_env_from_points(cell_grid, packed_ijks, point_envs, point_mask, cell_env)
+    wp.launch(
+        _fill_environment_cell_level_flat,
+        dim=point_count,
+        device=device,
+        inputs=[cell_grid.id, point_mask, packed_ijks, packed_levels, cell_level],
+    )
+
+    packed_ijks.release()
+    packed_levels.release()
+    cell_counts.release()
+    min_x.release()
+    max_x.release()
+    return cell_grid, cell_level, cell_env, env_offsets
+
+
+@wp.kernel
+def _accumulate_environment_adaptive_bounds_ijk(
+    points: wp.array(dtype=wp.vec3i),
+    cell_levels: wp.array(dtype=wp.uint8),
+    point_envs: wp.array(dtype=int),
+    point_mask: wp.array(dtype=wp.int32),
+    cell_counts: wp.array(dtype=int),
+    min_x: wp.array(dtype=int),
+    max_x: wp.array(dtype=int),
+):
+    point = wp.tid()
+    if point_mask:
+        if point_mask[point] == 0:
+            return
+
+    env = point_envs[point]
+    cell = points[point]
+    level_extent = (1 << int(cell_levels[point])) - 1
+    wp.atomic_add(cell_counts, env, 1)
+    wp.atomic_min(min_x, env, cell[0])
+    wp.atomic_max(max_x, env, cell[0] + level_extent)
+
+
+@wp.kernel
+def _accumulate_environment_adaptive_bounds_world(
+    points: wp.array(dtype=wp.vec3f),
+    cell_levels: wp.array(dtype=wp.uint8),
+    point_envs: wp.array(dtype=int),
+    point_mask: wp.array(dtype=wp.int32),
+    inverse_transform: wp.mat33f,
+    translation: wp.vec3f,
+    cell_counts: wp.array(dtype=int),
+    min_x: wp.array(dtype=int),
+    max_x: wp.array(dtype=int),
+):
+    point = wp.tid()
+    if point_mask:
+        if point_mask[point] == 0:
+            return
+
+    env = point_envs[point]
+    cell = _world_point_cell_ijk(points[point], inverse_transform, translation)
+    level_extent = (1 << int(cell_levels[point])) - 1
+    wp.atomic_add(cell_counts, env, 1)
+    wp.atomic_min(min_x, env, cell[0])
+    wp.atomic_max(max_x, env, cell[0] + level_extent)
+
+
+@wp.kernel
+def _pack_environment_adaptive_voxels_ijk(
+    points: wp.array(dtype=wp.vec3i),
+    cell_levels: wp.array(dtype=wp.uint8),
+    point_envs: wp.array(dtype=int),
+    point_mask: wp.array(dtype=wp.int32),
+    env_offsets: wp.array(dtype=wp.vec3i),
+    packed_ijk: wp.array(dtype=wp.vec3i),
+    packed_level: wp.array(dtype=wp.uint8),
+):
+    point = wp.tid()
+    if point_mask:
+        if point_mask[point] == 0:
+            packed_ijk[point] = wp.vec3i(0)
+            packed_level[point] = wp.uint8(0)
+            return
+
+    packed_ijk[point] = points[point] + env_offsets[point_envs[point]]
+    packed_level[point] = cell_levels[point]
+
+
+@wp.kernel
+def _pack_environment_adaptive_voxels_world(
+    points: wp.array(dtype=wp.vec3f),
+    cell_levels: wp.array(dtype=wp.uint8),
+    point_envs: wp.array(dtype=int),
+    point_mask: wp.array(dtype=wp.int32),
+    inverse_transform: wp.mat33f,
+    translation: wp.vec3f,
+    env_offsets: wp.array(dtype=wp.vec3i),
+    packed_ijk: wp.array(dtype=wp.vec3i),
+    packed_level: wp.array(dtype=wp.uint8),
+):
+    point = wp.tid()
+    if point_mask:
+        if point_mask[point] == 0:
+            packed_ijk[point] = wp.vec3i(0)
+            packed_level[point] = wp.uint8(0)
+            return
+
+    packed_ijk[point] = (
+        _world_point_cell_ijk(points[point], inverse_transform, translation) + env_offsets[point_envs[point]]
+    )
+    packed_level[point] = cell_levels[point]
+
+
+@wp.kernel
+def _fill_environment_cell_level_flat(
+    cell_grid: wp.uint64,
+    point_mask: wp.array(dtype=wp.int32),
+    packed_ijk: wp.array(dtype=wp.vec3i),
+    packed_level: wp.array(dtype=wp.uint8),
+    cell_level: wp.array(dtype=wp.uint8),
+):
+    point = wp.tid()
+    if point_mask:
+        if point_mask[point] == 0:
+            return
+
+    ijk = packed_ijk[point]
+    cell_index = wp.volume_lookup_index(cell_grid, ijk[0], ijk[1], ijk[2])
+    cell_level[cell_index] = packed_level[point]
+
+
+# -- Module-level helper functions used in dynamic closures --
+
+
+@wp.func
+def _get_face_level(flags: wp.uint8):
+    return wp.int32(flags >> _FACE_LEVEL_BIT)
+
+
+@wp.func
+def _coarse_cell_coords(
+    fine_ijk: wp.vec3i,
+    fine_level: int,
+    fine_coords: Any,
+    coarse_ijk: wp.vec3i,
+    coarse_level: int,
+):
+    return (
+        type(fine_coords)(fine_ijk - coarse_ijk) + fine_coords * fine_coords.dtype(1 << fine_level)
+    ) / fine_coords.dtype(1 << coarse_level)
+
+
+# -- Topology-building kernels (precision-independent) --
+
+
+@wp.kernel
+def _cell_node_indices(
+    cell_ijk: wp.array(dtype=wp.vec3i),
+    cell_level: wp.array(dtype=wp.uint8),
+    node_ijk: wp.array2d(dtype=wp.vec3i),
+):
+    cell, n = wp.tid()
+    level = int(cell_level[cell])
+    offset = AdaptiveNanogrid.fine_ijk(wp.vec3i((n & 4) >> 2, (n & 2) >> 1, n & 1), level)
+    node_ijk[cell, n] = cell_ijk[cell] + offset
+
+
+@wp.kernel
+def _cell_face_indices(
+    cell_ijk: wp.array(dtype=wp.vec3i),
+    cell_level: wp.array(dtype=wp.uint8),
+    node_ijk: wp.array2d(dtype=wp.vec3i),
+):
+    cell = wp.tid()
+    ijk = cell_ijk[cell]
+    node_ijk[cell, 0] = NanogridBase._add_axis_flag(ijk, 0)
+    node_ijk[cell, 1] = NanogridBase._add_axis_flag(ijk, 1)
+    node_ijk[cell, 2] = NanogridBase._add_axis_flag(ijk, 2)
+
+    offset = 1 << int(cell_level[cell])
+
+    node_ijk[cell, 3] = NanogridBase._add_axis_flag(ijk + wp.vec3i(offset, 0, 0), 0)
+    node_ijk[cell, 4] = NanogridBase._add_axis_flag(ijk + wp.vec3i(0, offset, 0), 1)
+    node_ijk[cell, 5] = NanogridBase._add_axis_flag(ijk + wp.vec3i(0, 0, offset), 2)
+
+
+@wp.kernel
+def _cell_stacked_face_indices(
+    cell_ijk: wp.array(dtype=wp.vec3i),
+    cell_level: wp.array(dtype=wp.uint8),
+    node_ijk: wp.array2d(dtype=wp.vec3i),
+):
+    cell = wp.tid()
+    level = int(cell_level[cell])
+    ijk = AdaptiveNanogrid.coarse_ijk(cell_ijk[cell], level)
+
+    node_ijk[cell, 0] = AdaptiveNanogrid.encode_axis_and_level(ijk, 0, level)
+    node_ijk[cell, 1] = AdaptiveNanogrid.encode_axis_and_level(ijk, 1, level)
+    node_ijk[cell, 2] = AdaptiveNanogrid.encode_axis_and_level(ijk, 2, level)
+
+    node_ijk[cell, 3] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(1, 0, 0), 0, level)
+    node_ijk[cell, 4] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 1, 0), 1, level)
+    node_ijk[cell, 5] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 0, 1), 2, level)
+
+
+@wp.kernel
+def _cell_stacked_edge_indices(
+    cell_ijk: wp.array(dtype=wp.vec3i),
+    cell_level: wp.array(dtype=wp.uint8),
+    edge_ijk: wp.array2d(dtype=wp.vec3i),
+):
+    cell = wp.tid()
+    level = int(cell_level[cell])
+    ijk = AdaptiveNanogrid.coarse_ijk(cell_ijk[cell], level)
+
+    edge_ijk[cell, 0] = AdaptiveNanogrid.encode_axis_and_level(ijk, 0, level)
+    edge_ijk[cell, 1] = AdaptiveNanogrid.encode_axis_and_level(ijk, 1, level)
+    edge_ijk[cell, 2] = AdaptiveNanogrid.encode_axis_and_level(ijk, 2, level)
+
+    edge_ijk[cell, 3] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 1, 0), 0, level)
+    edge_ijk[cell, 4] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 0, 1), 1, level)
+    edge_ijk[cell, 5] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(1, 0, 0), 2, level)
+
+    edge_ijk[cell, 6] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 1, 1), 0, level)
+    edge_ijk[cell, 7] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(1, 0, 1), 1, level)
+    edge_ijk[cell, 8] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(1, 1, 0), 2, level)
+
+    edge_ijk[cell, 9] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 0, 1), 0, level)
+    edge_ijk[cell, 10] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(1, 0, 0), 1, level)
+    edge_ijk[cell, 11] = AdaptiveNanogrid.encode_axis_and_level(ijk + wp.vec3i(0, 1, 0), 2, level)
+
+
+def _build_node_grid(cell_ijk, cell_level, cell_grid: wp.Volume, temporary_store: cache.TemporaryStore):
+    cell_count = cell_ijk.shape[0]
+    cell_nodes = cache.borrow_temporary(temporary_store, shape=(cell_count, 8), dtype=wp.vec3i, device=cell_ijk.device)
+    wp.launch(
+        _cell_node_indices, dim=cell_nodes.shape, inputs=[cell_ijk, cell_level, cell_nodes], device=cell_ijk.device
+    )
+    node_grid = wp.Volume.allocate_by_voxels(
+        cell_nodes.flatten(), voxel_size=cell_grid.get_voxel_size()[0], device=cell_ijk.device
+    )
+    cell_nodes.release()
+    return node_grid
+
+
+def _build_cell_face_grid(cell_ijk, cell_level, grid: wp.Volume, temporary_store: cache.TemporaryStore):
+    cell_count = cell_ijk.shape[0]
+    cell_faces = cache.borrow_temporary(temporary_store, shape=(cell_count, 6), dtype=wp.vec3i, device=cell_ijk.device)
+    wp.launch(_cell_face_indices, dim=cell_count, inputs=[cell_ijk, cell_level, cell_faces], device=cell_ijk.device)
+    face_grid = wp.Volume.allocate_by_voxels(
+        cell_faces.flatten(), voxel_size=grid.get_voxel_size()[0], device=cell_ijk.device
+    )
+    cell_faces.release()
+    return face_grid
+
+
+def _build_completed_face_grid(
+    cell_face_grid: wp.Volume,
+    cell_grid: wp.Volume,
+    level_count: int,
+    cell_level: wp.array,
+    temporary_store: cache.TemporaryStore,
+):
+    device = cell_grid.device
+    cell_face_count = cell_face_grid.get_voxel_count()
+    cell_face_ijk = cache.borrow_temporary(temporary_store, shape=(cell_face_count,), dtype=wp.vec3i, device=device)
+    additional_face_count = cache.borrow_temporary(temporary_store, shape=1, dtype=int, device=device)
+
+    cell_face_grid.get_voxels(out=cell_face_ijk)
+    additional_face_count.zero_()
+    wp.launch(
+        _count_multires_faces,
+        dim=cell_face_count,
+        device=device,
+        inputs=[cell_grid.id, level_count, cell_level, cell_face_ijk, additional_face_count],
+    )
+
+    cat_face_count = cell_face_count + int(additional_face_count.numpy()[0])
+    cat_face_ijk = cache.borrow_temporary(temporary_store, shape=(cat_face_count,), dtype=wp.vec3i, device=device)
+    wp.copy(src=cell_face_ijk, dest=cat_face_ijk, dest_offset=cat_face_count - cell_face_count)
+
+    wp.launch(
+        _fill_multires_faces,
+        dim=cell_face_count,
+        device=device,
+        inputs=[cell_grid.id, level_count, cell_level, cell_face_ijk, additional_face_count, cat_face_ijk],
+    )
+    cell_face_ijk.release()
+    additional_face_count.release()
+
+    face_grid = wp.Volume.allocate_by_voxels(
+        cat_face_ijk.flatten(), voxel_size=cell_face_grid.get_voxel_size(), device=device
+    )
+    cat_face_ijk.release()
+    return face_grid
+
+
+def _build_stacked_face_grid(cell_ijk, cell_level, grid: wp.Volume, temporary_store: cache.TemporaryStore):
+    cell_count = cell_ijk.shape[0]
+    cell_faces = cache.borrow_temporary(temporary_store, shape=(cell_count, 6), dtype=wp.vec3i, device=cell_ijk.device)
+    wp.launch(
+        _cell_stacked_face_indices, dim=cell_count, inputs=[cell_ijk, cell_level, cell_faces], device=cell_ijk.device
+    )
+    face_grid = wp.Volume.allocate_by_voxels(
+        cell_faces.flatten(), voxel_size=grid.get_voxel_size()[0], device=cell_ijk.device
+    )
+    cell_faces.release()
+    return face_grid
+
+
+def _build_stacked_edge_grid(cell_ijk, cell_level, grid: wp.Volume, temporary_store: cache.TemporaryStore):
+    cell_count = cell_ijk.shape[0]
+    cell_edges = cache.borrow_temporary(temporary_store, shape=(cell_count, 12), dtype=wp.vec3i, device=cell_ijk.device)
+    wp.launch(
+        _cell_stacked_edge_indices, dim=cell_count, inputs=[cell_ijk, cell_level, cell_edges], device=cell_ijk.device
+    )
+    edge_grid = wp.Volume.allocate_by_voxels(
+        cell_edges.flatten(), voxel_size=grid.get_voxel_size()[0], device=cell_ijk.device
+    )
+    cell_edges.release()
+    return edge_grid
+
+
+@wp.func
+def _find_face_neighbours(
+    cell_grid: wp.uint64,
+    ijk: wp.vec3i,
+    axis: int,
+    level_count: int,
+    cell_level: wp.array(dtype=wp.uint8),
+):
+    ijk_minus = ijk
+    ijk_minus[axis] -= 1
+    plus_cell_index = AdaptiveNanogrid.find_cell(cell_grid, ijk, level_count, cell_level)
+    minus_cell_index = AdaptiveNanogrid.find_cell(cell_grid, ijk_minus, level_count, cell_level)
+    return plus_cell_index, minus_cell_index
+
+
+@wp.kernel
+def _count_multires_faces(
+    cell_grid: wp.uint64,
+    level_count: int,
+    cell_level: wp.array(dtype=wp.uint8),
+    face_ijk: wp.array(dtype=wp.vec3i),
+    count: wp.array(dtype=int),
+):
+    face = wp.tid()
+    axis, ijk = NanogridBase._extract_axis_flag(face_ijk[face])
+    plus_cell_index, minus_cell_index = _find_face_neighbours(cell_grid, ijk, axis, level_count, cell_level)
+    if plus_cell_index == -1 or minus_cell_index == -1:
+        return
+    plus_level = int(cell_level[plus_cell_index])
+    minus_level = int(cell_level[minus_cell_index])
+    level_diff = wp.abs(plus_level - minus_level)
+    if level_diff != 0:
+        fine_face_count = 1 << (2 * level_diff)
+        wp.atomic_add(count, 0, fine_face_count)
+
+
+@wp.kernel
+def _fill_multires_faces(
+    cell_grid: wp.uint64,
+    level_count: int,
+    cell_level: wp.array(dtype=wp.uint8),
+    face_ijk: wp.array(dtype=wp.vec3i),
+    count: wp.array(dtype=int),
+    added_ijk: wp.array(dtype=wp.vec3i),
+):
+    face = wp.tid()
+    axis, ijk = NanogridBase._extract_axis_flag(face_ijk[face])
+    plus_cell_index, minus_cell_index = _find_face_neighbours(cell_grid, ijk, axis, level_count, cell_level)
+    if plus_cell_index == -1 or minus_cell_index == -1:
+        return
+    plus_level = int(cell_level[plus_cell_index])
+    minus_level = int(cell_level[minus_cell_index])
+    level_diff = wp.abs(plus_level - minus_level)
+    if level_diff != 0:
+        fine_face_count = 1 << (2 * level_diff)
+        side_mask = (1 << level_diff) - 1
+        fine_level = min(plus_level, minus_level)
+        base_level = max(plus_level, minus_level)
+        base_mask = ~((1 << base_level) - 1)
+        base_ijk = wp.vec3i(ijk[0] & base_mask, ijk[1] & base_mask, ijk[2] & base_mask)
+        offset = wp.atomic_sub(count, 0, fine_face_count) - fine_face_count
+        for f in range(fine_face_count):
+            f_ijk = base_ijk
+            f_ijk[(axis + 1) % 3] |= (f & side_mask) << fine_level
+            f_ijk[(axis + 2) % 3] |= (f >> level_diff) << fine_level
+            added_ijk[offset + f] = NanogridBase._add_axis_flag(f_ijk, axis)
+
+
+@wp.kernel
+def _build_face_indices_and_flags(
+    cell_grid: wp.uint64,
+    level_count: int,
+    cell_level: wp.array(dtype=wp.uint8),
+    cell_env: wp.array(dtype=int),
+    face_ijk: wp.array(dtype=wp.vec3i),
+    face_cell_indices: wp.array(dtype=wp.vec2i),
+    face_env: wp.array(dtype=int),
+    face_flags: wp.array(dtype=wp.uint8),
+    boundary_face_mask: wp.array(dtype=int),
+):
+    face = wp.tid()
+    axis, ijk = NanogridBase._extract_axis_flag(face_ijk[face])
+    plus_cell_index, minus_cell_index = _find_face_neighbours(cell_grid, ijk, axis, level_count, cell_level)
+    inner_cell = wp.where(minus_cell_index == -1, plus_cell_index, minus_cell_index)
+    outer_cell = wp.where(plus_cell_index == -1, minus_cell_index, plus_cell_index)
+    face_level = wp.min(cell_level[inner_cell], cell_level[outer_cell])
+    face_ijk[face] = ijk
+    flags = NanogridBase._make_face_flags(axis, plus_cell_index, minus_cell_index) | (face_level << _FACE_LEVEL_BIT)
+    face_flags[face] = flags
+    boundary_face_mask[face] = NanogridBase._get_boundary_mask(flags)
+    face_cell_indices[face] = wp.vec2i(inner_cell, outer_cell)
+    face_env[face] = cell_env[inner_cell]

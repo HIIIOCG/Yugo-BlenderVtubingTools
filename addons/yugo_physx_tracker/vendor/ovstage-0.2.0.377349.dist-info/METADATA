@@ -1,0 +1,57 @@
+Metadata-Version: 2.4
+Name: ovstage
+Version: 0.2.0.377349
+Summary: NVIDIA OVStage Data Plane Python API
+Author: NVIDIA Corporation
+License-Expression: LicenseRef-NvidiaProprietary
+Project-URL: Homepage, https://github.com/NVIDIA-Omniverse/ovstage
+Project-URL: Documentation, https://nvidia-omniverse.github.io/ovstage/
+Project-URL: Repository, https://github.com/NVIDIA-Omniverse/ovstage
+Project-URL: Changelog, https://github.com/NVIDIA-Omniverse/ovstage/blob/main/CHANGELOG.md
+Keywords: nvidia,omniverse,ovstage,usd,openusd
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: Natural Language :: English
+Classifier: Programming Language :: C
+Classifier: Programming Language :: C++
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Environment :: GPU :: NVIDIA CUDA
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Software Development :: Libraries
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# NVIDIA ovstage
+
+[![Documentation](https://img.shields.io/badge/docs-ovstage-blue)](https://nvidia-omniverse.github.io/ovstage)
+[![Repository](https://img.shields.io/badge/github-NVIDIA--Omniverse%2Fovstage-181717)](https://github.com/NVIDIA-Omniverse/ovstage)
+
+**ovstage** is a C and Python library providing a shared, high-performance, vectorized, GPU-capable scene data substrate for [OpenUSD](https://openusd.org) scene data, for use in Omniverse Libraries spanning physics, rendering, sensors, animation, and more.
+
+It provides C and Python APIs for reading, writing, querying, and managing simulation data such as transforms, velocities, materials, hierarchy, and metadata across CPU and GPU memory, with zero-copy data paths and DLPack tensor interchange. Currently, zero-copy applies to CUDA source-tensor writes; payload reads and map/unmap buffers are CPU-resident. No Omniverse background is needed — it is a standalone library that gives your application a fast, vectorized, in-memory representation of a scene to read and write from C or Python.
+
+> **Pre-release:** the API, runtime behavior, and packaging may change.
+
+## Install
+
+```
+pip install ovstage
+```
+
+## Documentation
+
+Full C and Python API documentation, guides, and runnable examples are at
+**<https://nvidia-omniverse.github.io/ovstage>**. Source, examples, and the C SDK
+release archives live at <https://github.com/NVIDIA-Omniverse/ovstage>.
+
+## License
+
+NVIDIA Proprietary Software. See the LICENSE file included in this distribution.

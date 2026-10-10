@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import warp as wp
+from warp._src.types import type_repr
+
+
+@wp.kernel
+def adam_step_kernel_vec3(
+    g: wp.array(dtype=wp.vec3),
+    m: wp.array(dtype=wp.vec3),
+    v: wp.array(dtype=wp.vec3),
+    lr: float,
+    beta1: float,
+    beta2: float,
+    t: float,
+    eps: float,
+    params: wp.array(dtype=wp.vec3),
+):
+    i = wp.tid()
+    m[i] = beta1 * m[i] + (1.0 - beta1) * g[i]
+    v[i] = beta2 * v[i] + (1.0 - beta2) * wp.cw_mul(g[i], g[i])
+    mhat = m[i] / (1.0 - wp.pow(beta1, (t + 1.0)))
+    vhat = v[i] / (1.0 - wp.pow(beta2, (t + 1.0)))
+    sqrt_vhat = wp.vec3(wp.sqrt(vhat[0]), wp.sqrt(vhat[1]), wp.sqrt(vhat[2]))
+    eps_vec3 = wp.vec3(eps, eps, eps)
+    params[i] = params[i] - lr * wp.cw_div(mhat, (sqrt_vhat + eps_vec3))
+
+
+@wp.kernel
+def adam_step_kernel_float(
+    g: wp.array(dtype=float),
+    m: wp.array(dtype=float),
+    v: wp.array(dtype=float),
+    lr: float,
+    beta1: float,
+    beta2: float,
+    t: float,
+    eps: float,
+    params: wp.array(dtype=float),
+):
+    i = wp.tid()
+    m[i] = beta1 * m[i] + (1.0 - beta1) * g[i]
+    v[i] = beta2 * v[i] + (1.0 - beta2) * g[i] * g[i]
+    mhat = m[i] / (1.0 - wp.pow(beta1, (t + 1.0)))
+    vhat = v[i] / (1.0 - wp.pow(beta2, (t + 1.0)))
+    params[i] = params[i] - lr * mhat / (wp.sqrt(vhat) + eps)
+
+
+@wp.kernel
+def adam_step_kernel_half(
+    g: wp.array(dtype=wp.float16),
+    m: wp.array(dtype=float),
+    v: wp.array(dtype=float),
+    lr: float,
+    beta1: float,
+    beta2: float,
+    t: float,
+    eps: float,
+    params: wp.array(dtype=wp.float16),
+):
+    i = wp.tid()
+    m[i] = beta1 * m[i] + (1.0 - beta1) * float(g[i])
+    v[i] = beta2 * v[i] + (1.0 - beta2) * float(g[i]) * float(g[i])
+    mhat = m[i] / (1.0 - wp.pow(beta1, (t + 1.0)))
+    vhat = v[i] / (1.0 - wp.pow(beta2, (t + 1.0)))
+    params[i] = params[i] - wp.float16(lr * mhat / (wp.sqrt(vhat) + eps))
+
+
+class Adam:
+    """Adaptive Moment Estimation (Adam) optimizer.
+
+    Adam is an adaptive learning rate optimization algorithm that computes
+    individual learning rates for different parameters from estimates of first
+    and second moments of the gradients. This implementation is designed for
+    GPU-accelerated parameter updates using Warp kernels.
+
+    The algorithm maintains exponential moving averages of the gradient (first
+    moment) and the squared gradient (second moment), using bias correction to
+    account for their initialization at zero.
+
+    The interface is similar to `PyTorch's torch.optim.Adam
+    <https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html>`_.
+
+    Args:
+        params: List of :class:`warp.array` objects to optimize. Can be ``None``
+            and set later via :meth:`set_params`. Supported dtypes are
+            :class:`warp.float16`, :class:`warp.float32`, and :class:`warp.vec3`.
+        lr: Learning rate (step size).
+        betas: Coefficients for computing running averages of gradient and its
+            square. Tuple of two floats ``(beta1, beta2)`` where ``beta1`` is the
+            exponential decay rate for the first moment and ``beta2`` is the decay
+            rate for the second moment.
+        eps: Small constant added to denominator for numerical stability.
+    """
+
+    def __init__(self, params=None, lr=0.001, betas=(0.9, 0.999), eps=1e-08):
+        self.m = []  # first moment
+        self.v = []  # second moment
+        self.set_params(params)
+        self.lr = lr
+        self.beta1 = betas[0]
+        self.beta2 = betas[1]
+        self.eps = eps
+        self.t = 0
+
+    def set_params(self, params):
+        """Set parameters to optimize and allocate moment buffers.
+
+        Args:
+            params: List of :class:`warp.array` objects to optimize, or ``None``.
+        """
+        self.params = params
+        if params is not None and isinstance(params, list) and len(params) > 0:
+            if len(self.m) != len(params):
+                self.m = [None] * len(params)  # reset first moment
+            if len(self.v) != len(params):
+                self.v = [None] * len(params)  # reset second moment
+            for i in range(len(params)):
+                param = params[i]
+
+                if param.dtype == wp.vec3:
+                    dtype = wp.vec3
+                elif param.dtype == wp.float32:
+                    dtype = wp.float32
+                elif param.dtype == wp.float16:
+                    dtype = wp.float32  # we always use fp32 for moments, even if params are fp16
+                else:
+                    raise RuntimeError(f"Unsupported dtype for Warp Adam optimizer: {param.dtype}")
+
+                # Moments are always fp32 even for fp16 params, so compare against ``dtype`` (the moment
+                # buffer dtype), not ``param.dtype``, otherwise the buffers are re-zeroed on every call.
+                if self.m[i] is None or self.m[i].shape != param.shape or self.m[i].dtype != dtype:
+                    self.m[i] = wp.zeros(shape=param.shape, dtype=dtype, device=param.device)
+                elif self.m[i].device != param.device:
+                    self.m[i] = self.m[i].to(param.device)
+                if self.v[i] is None or self.v[i].shape != param.shape or self.v[i].dtype != dtype:
+                    self.v[i] = wp.zeros(shape=param.shape, dtype=dtype, device=param.device)
+                elif self.v[i].device != param.device:
+                    self.v[i] = self.v[i].to(param.device)
+
+    def reset_internal_state(self):
+        """Reset moment buffers and timestep to zero."""
+        for m_i in self.m:
+            m_i.zero_()
+        for v_i in self.v:
+            v_i.zero_()
+        self.t = 0
+
+    def step(self, grad):
+        """Apply one Adam step using the provided gradients.
+
+        Args:
+            grad: List of gradient arrays matching ``params``.
+        """
+        if self.params is None:
+            raise RuntimeError("Adam parameters must be set before calling step(), got None")
+        for i in range(len(self.params)):
+            Adam.step_detail(
+                grad[i], self.m[i], self.v[i], self.lr, self.beta1, self.beta2, self.t, self.eps, self.params[i]
+            )
+        self.t = self.t + 1
+
+    @staticmethod
+    def step_detail(g, m, v, lr, beta1, beta2, t, eps, params):
+        """Apply an Adam update to a single parameter array.
+
+        Args:
+            g: Gradient array.
+            m: First-moment buffer.
+            v: Second-moment buffer.
+            lr: Learning rate.
+            beta1: Exponential decay for the first moment.
+            beta2: Exponential decay for the second moment.
+            t: Current step index.
+            eps: Numerical stability term.
+            params: Parameter array to update in-place.
+        """
+        if params.dtype != g.dtype:
+            raise TypeError(
+                f"Adam gradient dtype must match parameter dtype {type_repr(params.dtype)}, got {type_repr(g.dtype)}"
+            )
+        if params.shape != g.shape:
+            raise ValueError(f"Adam gradient shape must match parameter shape {params.shape}, got {g.shape}")
+        kernel_inputs = [g, m, v, lr, beta1, beta2, t, eps, params]
+        if params.dtype == wp._src.types.float32:
+            wp.launch(
+                kernel=adam_step_kernel_float,
+                dim=len(params),
+                inputs=kernel_inputs,
+                device=params.device,
+            )
+        elif params.dtype == wp._src.types.float16:
+            wp.launch(
+                kernel=adam_step_kernel_half,
+                dim=len(params),
+                inputs=kernel_inputs,
+                device=params.device,
+            )
+        elif params.dtype == wp._src.types.vec3:
+            wp.launch(
+                kernel=adam_step_kernel_vec3,
+                dim=len(params),
+                inputs=kernel_inputs,
+                device=params.device,
+            )
+        else:
+            raise RuntimeError("Params data type not supported in Adam step kernels.")

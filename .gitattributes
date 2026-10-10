@@ -3,3 +3,11 @@
 *.blend binary
 *.blend[1-9] binary
 *.zip binary
+
+# Preserve the exact imported ProtoMotions CPU distribution, including notices.
+addons/yugo_physx_tracker/** -text
+addons/yugo_physx_tracker/vendor/** linguist-vendored
+addons/yugo_physx_tracker/vendor/**/*.dll filter=lfs diff=lfs merge=lfs -text
+addons/yugo_physx_tracker/vendor/**/*.pyd filter=lfs diff=lfs merge=lfs -text
+addons/yugo_physx_tracker/assets/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+addons/yugo_physx_tracker/assets/**/*.npz filter=lfs diff=lfs merge=lfs -text

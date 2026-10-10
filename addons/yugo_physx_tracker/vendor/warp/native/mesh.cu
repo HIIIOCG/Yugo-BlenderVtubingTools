@@ -1,0 +1,456 @@
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#include "warp.h"
+
+#include "bvh.h"
+#include "cuda_util.h"
+#include "error.h"
+#include "mesh.h"
+#include "scan.h"
+
+extern CUcontext get_current_context();
+
+namespace wp {
+
+__global__ void compute_triangle_bounds(int n, const vec3* points, const int* indices, vec3* lowers, vec3* uppers)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid < n) {
+        // if leaf then update bounds
+        int i = indices[tid * 3 + 0];
+        int j = indices[tid * 3 + 1];
+        int k = indices[tid * 3 + 2];
+
+        vec3 p = points[i];
+        vec3 q = points[j];
+        vec3 r = points[k];
+
+        vec3 lower = min(min(p, q), r);
+        vec3 upper = max(max(p, q), r);
+
+        lowers[tid] = lower;
+        uppers[tid] = upper;
+    }
+}
+
+__global__ void compute_mesh_edge_lengths(int n, const vec3* points, const int* indices, float* edge_lengths)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid < n) {
+        // if leaf then update bounds
+        int i = indices[tid * 3 + 0];
+        int j = indices[tid * 3 + 1];
+        int k = indices[tid * 3 + 2];
+
+        vec3 p = points[i];
+        vec3 q = points[j];
+        vec3 r = points[k];
+
+
+        edge_lengths[tid] = length(p - q) + length(p - r) + length(q - r);
+    }
+}
+
+__global__ void compute_average_mesh_edge_length(int n, float* sum_edge_lengths, Mesh* m)
+{
+    m->average_edge_length = sum_edge_lengths[n - 1] / (3 * n);
+}
+
+__global__ void bvh_refit_with_solid_angle_kernel(
+    int n,
+    const int* __restrict__ parents,
+    int* __restrict__ child_count,
+    BVHPackedNodeHalf* __restrict__ node_lowers,
+    BVHPackedNodeHalf* __restrict__ node_uppers,
+    const vec3* points,
+    const int* indices,
+    const int* primitive_indices,
+    SolidAngleProps* solid_angle_props
+)
+{
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (index < n) {
+        bool leaf = node_lowers[index].b;
+        int parent = parents[index];
+
+        if (leaf) {
+            BVHPackedNodeHalf& lower = node_lowers[index];
+            BVHPackedNodeHalf& upper = node_uppers[index];
+
+            // update the leaf node
+            bool true_leaf = true;
+
+            if (parent != -1) {
+                true_leaf = !node_lowers[parent].b;
+            }
+
+            if (true_leaf) {
+                SolidAngleProps node_solid_angle_props;
+
+                const int start = lower.i;
+                const int end = upper.i;
+
+                // loops through primitives in the leaf
+                for (int primitive_counter = start; primitive_counter < end; primitive_counter++) {
+                    int primitive_index = primitive_indices[primitive_counter];
+                    if (primitive_counter == start) {
+                        precompute_triangle_solid_angle_props(
+                            points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                            points[indices[primitive_index * 3 + 2]], node_solid_angle_props
+                        );
+                    } else {
+                        SolidAngleProps triangle_solid_angle_props;
+                        precompute_triangle_solid_angle_props(
+                            points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                            points[indices[primitive_index * 3 + 2]], triangle_solid_angle_props
+                        );
+                        node_solid_angle_props = combine_precomputed_solid_angle_props(
+                            &node_solid_angle_props, &triangle_solid_angle_props
+                        );
+                    }
+                }
+
+                (vec3&)lower = node_solid_angle_props.box.lower;
+                (vec3&)upper = node_solid_angle_props.box.upper;
+                solid_angle_props[index] = node_solid_angle_props;
+            }
+        }
+
+        else {
+            // only keep leaf threads
+            return;
+        }
+
+        // update hierarchy
+        for (;;) {
+            parent = parents[index];
+
+            // reached root
+            if (parent == -1)
+                return;
+
+            // ensure all writes are visible
+            __threadfence();
+
+            int finished = atomicAdd(&child_count[parent], 1);
+
+            // if we have are the last thread (such that the parent node is now complete)
+            // then update its bounds and move onto the next parent in the hierarchy
+            if (finished == 1) {
+                BVHPackedNodeHalf& parent_lower = node_lowers[parent];
+                BVHPackedNodeHalf& parent_upper = node_uppers[parent];
+                if (parent_lower.b)
+                // a packed leaf node can still be a parent in LBVH, we need to recompute its bounds
+                // since we've lost its left and right child node index in the muting process
+                {
+                    int parent_parent = parents[parent];
+                    ;
+                    // only need to compute bound when this is a valid leaf node
+                    bool true_leaf = true;
+
+                    if (parent_parent != -1) {
+                        true_leaf = !node_lowers[parent_parent].b;
+                    }
+
+                    if (true_leaf) {
+                        SolidAngleProps node_solid_angle_props;
+                        const int start = parent_lower.i;
+                        const int end = parent_upper.i;
+                        // loops through primitives in the leaf
+                        for (int primitive_counter = start; primitive_counter < end; primitive_counter++) {
+                            int primitive_index = primitive_indices[primitive_counter];
+                            if (primitive_counter == start) {
+                                precompute_triangle_solid_angle_props(
+                                    points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                                    points[indices[primitive_index * 3 + 2]], node_solid_angle_props
+                                );
+                            } else {
+                                SolidAngleProps triangle_solid_angle_props;
+                                precompute_triangle_solid_angle_props(
+                                    points[indices[primitive_index * 3 + 0]], points[indices[primitive_index * 3 + 1]],
+                                    points[indices[primitive_index * 3 + 2]], triangle_solid_angle_props
+                                );
+                                node_solid_angle_props = combine_precomputed_solid_angle_props(
+                                    &node_solid_angle_props, &triangle_solid_angle_props
+                                );
+                            }
+                        }
+
+                        (vec3&)parent_lower = node_solid_angle_props.box.lower;
+                        (vec3&)parent_upper = node_solid_angle_props.box.upper;
+                        solid_angle_props[parent] = node_solid_angle_props;
+                    }
+                } else {
+                    // printf("Compute non-leaf at %d\n", index);
+                    const int left_child = node_lowers[parent].i;
+                    const int right_child = node_uppers[parent].i;
+
+                    vec3 left_lower = (vec3&)(node_lowers[left_child]);
+                    vec3 left_upper = (vec3&)(node_uppers[left_child]);
+                    vec3 right_lower = (vec3&)(node_lowers[right_child]);
+                    vec3 right_upper = (vec3&)(node_uppers[right_child]);
+
+                    // union of child bounds
+                    vec3 lower = min(left_lower, right_lower);
+                    vec3 upper = max(left_upper, right_upper);
+
+                    // write new BVH nodes
+                    (vec3&)parent_lower = lower;
+                    (vec3&)parent_upper = upper;
+
+                    // combine
+                    SolidAngleProps* left_child_data = &solid_angle_props[left_child];
+                    SolidAngleProps* right_child_data
+                        = (left_child != right_child) ? &solid_angle_props[right_child] : NULL;
+
+                    combine_precomputed_solid_angle_props(solid_angle_props[parent], left_child_data, right_child_data);
+                }
+                // move onto processing the parent
+                index = parent;
+            } else {
+                // parent not ready (we are the first child), terminate thread
+                break;
+            }
+        }
+    }
+}
+
+
+void bvh_refit_with_solid_angle_device(BVH& bvh, Mesh& mesh)
+{
+    ContextGuard guard(bvh.context);
+
+    // clear child counters
+    wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_counts, 0, sizeof(int) * bvh.max_nodes);
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, bvh_refit_with_solid_angle_kernel, bvh.num_leaf_nodes,
+        (bvh.num_leaf_nodes, bvh.node_parents, bvh.node_counts, bvh.node_lowers, bvh.node_uppers, mesh.points,
+         mesh.indices, bvh.primitive_indices, mesh.solid_angle_props)
+    );
+}
+
+}  // namespace wp
+
+
+static void wp_mesh_free_device_allocations(wp::Mesh& mesh, wp::Mesh* mesh_device)
+{
+    if (mesh.lowers) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
+        mesh.lowers = nullptr;
+    }
+    if (mesh.uppers) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
+        mesh.uppers = nullptr;
+    }
+    if (mesh.solid_angle_props) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.solid_angle_props);
+        mesh.solid_angle_props = nullptr;
+    }
+    if (mesh_device) {
+        wp_free_device(WP_CURRENT_CONTEXT, mesh_device);
+    }
+}
+
+uint64_t wp_mesh_create_device(
+    void* context,
+    wp::array_t<wp::vec3> points,
+    wp::array_t<wp::vec3> velocities,
+    wp::array_t<int> indices,
+    int num_points,
+    int num_tris,
+    int support_winding_number,
+    int constructor_type,
+    int* groups,
+    int bvh_leaf_size
+)
+{
+    ContextGuard guard(context);
+
+    wp::Mesh mesh(points, velocities, indices, num_points, num_tris);
+    const bool use_cubql = (constructor_type == BVH_CONSTRUCTOR_CUBQL);
+
+    mesh.context = context ? context : wp_cuda_context_get_current();
+
+    // create lower upper arrays expected by GPU BVH builder
+    mesh.lowers = (wp::vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::vec3) * num_tris, "(native:mesh)");
+    mesh.uppers = (wp::vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::vec3) * num_tris, "(native:mesh)");
+
+    if (support_winding_number && !use_cubql) {
+        int num_bvh_nodes = 2 * num_tris;
+        mesh.solid_angle_props = (wp::SolidAngleProps*)wp_alloc_device(
+            WP_CURRENT_CONTEXT, sizeof(wp::SolidAngleProps) * num_bvh_nodes, "(native:mesh)"
+        );
+    }
+
+    wp::Mesh* mesh_device = (wp::Mesh*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::Mesh), "(native:mesh)");
+    wp_memcpy_h2d(WP_CURRENT_CONTEXT, mesh_device, &mesh, sizeof(wp::Mesh));
+
+    // save descriptor
+    uint64_t mesh_id = (uint64_t)mesh_device;
+
+    // we compute mesh the average edge length
+    // for use in mesh_query_point_sign_normal()
+    // since it relies on an epsilon for welding
+    // reuse bounds memory temporarily for computing edge lengths
+    float* length_tmp_ptr = (float*)mesh.lowers;
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, wp::compute_mesh_edge_lengths, mesh.num_tris,
+        (mesh.num_tris, mesh.points, mesh.indices, length_tmp_ptr)
+    );
+    scan_device(length_tmp_ptr, length_tmp_ptr, mesh.num_tris, true);
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, wp::compute_average_mesh_edge_length, 1, (mesh.num_tris, length_tmp_ptr, mesh_device)
+    );
+
+    // compute triangle bound and construct BVH
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, wp::compute_triangle_bounds, mesh.num_tris,
+        (mesh.num_tris, mesh.points, mesh.indices, mesh.lowers, mesh.uppers)
+    );
+#ifndef WP_DISABLE_CUBQL
+    if (use_cubql) {
+        wp::cubql_bvh_create_device(mesh.context, mesh.lowers, mesh.uppers, num_tris, bvh_leaf_size, mesh.bvh);
+        if ((!mesh.bvh.node_lowers || !mesh.bvh.primitive_indices) && num_tris > 0) {
+            wp::cubql_bvh_destroy_device(mesh.bvh);
+            wp_mesh_free_device_allocations(mesh, mesh_device);
+            return 0;
+        }
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, &(mesh_device->bvh), &mesh.bvh, sizeof(wp::BVH));
+    } else
+#else
+    if (use_cubql) {
+        wp::set_error_string("Warp error: cuBQL support disabled (WP_DISABLE_CUBQL)");
+        wp_mesh_free_device_allocations(mesh, mesh_device);
+        return 0;
+    }
+#endif
+    {
+        wp::bvh_create_device(
+            mesh.context, mesh.lowers, mesh.uppers, num_tris, constructor_type, groups, bvh_leaf_size, mesh.bvh
+        );
+        // we need to overwrite mesh.bvh because it is not initialized when we construct it on device
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, &(mesh_device->bvh), &mesh.bvh, sizeof(wp::BVH));
+    }
+
+    mesh_add_descriptor(mesh_id, mesh);
+
+    if (support_winding_number && !use_cubql)
+        wp_mesh_refit_device(mesh_id);
+
+    return mesh_id;
+}
+
+void wp_mesh_destroy_device(uint64_t id)
+{
+    wp::Mesh mesh;
+    if (wp::mesh_get_descriptor(id, mesh)) {
+        ContextGuard guard(mesh.context);
+
+        wp::bvh_destroy_device(mesh.bvh);
+
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
+        wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
+        wp_free_device(WP_CURRENT_CONTEXT, (wp::Mesh*)id);
+
+        if (mesh.solid_angle_props) {
+            wp_free_device(WP_CURRENT_CONTEXT, mesh.solid_angle_props);
+        }
+        wp::mesh_rem_descriptor(id);
+    }
+}
+
+void mesh_update_stats(uint64_t id) { }
+
+int wp_mesh_refit_device(uint64_t id)
+{
+    // recompute triangle bounds
+    wp::Mesh m;
+    if (mesh_get_descriptor(id, m)) {
+        ContextGuard guard(m.context);
+
+        // we compute mesh the average edge length
+        // for use in mesh_query_point_sign_normal()
+        // since it relies on an epsilon for welding
+
+        // reuse bounds memory temporarily for computing edge lengths
+        float* length_tmp_ptr = (float*)m.lowers;
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, wp::compute_mesh_edge_lengths, m.num_tris,
+            (m.num_tris, m.points, m.indices, length_tmp_ptr)
+        );
+
+        scan_device(length_tmp_ptr, length_tmp_ptr, m.num_tris, true);
+
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, wp::compute_average_mesh_edge_length, 1, (m.num_tris, length_tmp_ptr, (wp::Mesh*)id)
+        );
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, wp::compute_triangle_bounds, m.num_tris,
+            (m.num_tris, m.points, m.indices, m.lowers, m.uppers)
+        );
+
+        if (m.solid_angle_props) {
+            // update solid angle data
+            bvh_refit_with_solid_angle_device(m.bvh, m);
+        } else {
+            wp::bvh_refit_device(m.bvh);
+        }
+        return 1;
+    }
+
+    wp::set_error_string("Warp error: invalid mesh id");
+    return 0;
+}
+
+int wp_mesh_set_points_device(uint64_t id, wp::array_t<wp::vec3> points)
+{
+    wp::Mesh m;
+    if (mesh_get_descriptor(id, m)) {
+        if (points.ndim != 1 || points.shape[0] != m.points.shape[0]) {
+            wp::set_error_string(
+                "Warp error: new points input for wp_mesh_set_points_device does not match the original points shape"
+            );
+            return 0;
+        }
+
+        m.points = points;
+
+        wp::Mesh* mesh_device = (wp::Mesh*)id;
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, mesh_device, &m, sizeof(wp::Mesh));
+
+        // update the cpu copy as well
+        mesh_set_descriptor(id, m);
+
+        return wp_mesh_refit_device(id);
+    } else {
+        wp::set_error_string("Warp error: invalid mesh id");
+        return 0;
+    }
+}
+
+void wp_mesh_set_velocities_device(uint64_t id, wp::array_t<wp::vec3> velocities)
+{
+    wp::Mesh m;
+    if (mesh_get_descriptor(id, m)) {
+        if (velocities.ndim != 1 || velocities.shape[0] != m.velocities.shape[0]) {
+            wp::set_error_string(
+                "Warp error: new velocities input for wp_mesh_set_velocities_device does not match the original "
+                "velocities shape"
+            );
+            return;
+        }
+
+        m.velocities = velocities;
+
+        wp::Mesh* mesh_device = (wp::Mesh*)id;
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, mesh_device, &m, sizeof(wp::Mesh));
+        mesh_set_descriptor(id, m);
+    } else {
+        wp::set_error_string("Warp error: invalid mesh id");
+        return;
+    }
+}

@@ -1,0 +1,1328 @@
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// glibc/musl hide posix_memalign() (used in wp_alloc_host()) under strict -std=c++NN
+// unless _GNU_SOURCE is set before <stdlib.h>, pulled in early via "warp.h". Linux-only:
+// macOS/BSD declare it unconditionally and are sensitive to _POSIX_C_SOURCE.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
+#include "warp.h"
+
+#include "alloc_tracker.h"
+#include "apic.h"
+#include "apic_internal.h"
+#include "array.h"
+#include "error.h"
+#include "exports.h"
+#include "scan.h"
+#include "version.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+// MSVC provides _aligned_malloc() instead of the standard aligned_alloc()
+#if defined(_MSC_VER)
+#include <malloc.h>
+#endif
+
+uint16_t wp_float_to_half_bits(float x)
+{
+    // adapted from Fabien Giesen's post: https://gist.github.com/rygorous/2156668
+    union fp32 {
+        uint32_t u;
+        float f;
+
+        struct {
+            unsigned int mantissa : 23;
+            unsigned int exponent : 8;
+            unsigned int sign : 1;
+        };
+    };
+
+    fp32 f;
+    f.f = x;
+
+    fp32 f32infty = { 255 << 23 };
+    fp32 f16infty = { 31 << 23 };
+    fp32 magic = { 15 << 23 };
+    uint32_t sign_mask = 0x80000000u;
+    uint32_t round_mask = ~0xfffu;
+    uint16_t u;
+
+    uint32_t sign = f.u & sign_mask;
+    f.u ^= sign;
+
+    // NOTE all the integer compares in this function can be safely
+    // compiled into signed compares since all operands are below
+    // 0x80000000. Important if you want fast straight SSE2 code
+    // (since there's no unsigned PCMPGTD).
+
+    if (f.u >= f32infty.u)  // Inf or NaN (all exponent bits set)
+        u = (f.u > f32infty.u) ? 0x7e00 : 0x7c00;  // NaN->qNaN and Inf->Inf
+    else  // (De)normalized number or zero
+    {
+        f.u &= round_mask;
+        f.f *= magic.f;
+        f.u -= round_mask;
+        if (f.u > f16infty.u)
+            f.u = f16infty.u;  // Clamp to signed infinity if overflowed
+
+        u = f.u >> 13;  // Take the bits!
+    }
+
+    u |= sign >> 16;
+    return u;
+}
+
+float wp_half_bits_to_float(uint16_t u)
+{
+    // adapted from Fabien Giesen's post: https://gist.github.com/rygorous/2156668
+    union fp32 {
+        uint32_t u;
+        float f;
+
+        struct {
+            unsigned int mantissa : 23;
+            unsigned int exponent : 8;
+            unsigned int sign : 1;
+        };
+    };
+
+    static const fp32 magic = { 113 << 23 };
+    static const uint32_t shifted_exp = 0x7c00 << 13;  // exponent mask after shift
+    fp32 o;
+
+    o.u = (u & 0x7fff) << 13;  // exponent/mantissa bits
+    uint32_t exp = shifted_exp & o.u;  // just the exponent
+    o.u += (127 - 15) << 23;  // exponent adjust
+
+    // handle exponent special cases
+    if (exp == shifted_exp)  // Inf/NaN?
+        o.u += (128 - 16) << 23;  // extra exp adjust
+    else if (exp == 0)  // Zero/Denormal?
+    {
+        o.u += 1 << 23;  // extra exp adjust
+        o.f -= magic.f;  // renormalize
+    }
+
+    o.u |= (u & 0x8000) << 16;  // sign bit
+    return o.f;
+}
+
+uint16_t wp_float_to_bfloat16_bits(float x) { return wp::wp_float_to_bfloat16_bits_sw(x); }
+
+float wp_bfloat16_bits_to_float(uint16_t u) { return wp::wp_bfloat16_bits_to_float_sw(u); }
+
+int wp_init(const char* expected_version)
+{
+    // A non-null expected_version opts in to a version check; a mismatch is a hard error.
+    // Passing NULL (e.g. a C++ embedder that does not opt in) skips the check.
+    if (expected_version != NULL && strcmp(expected_version, WP_VERSION_STRING) != 0) {
+        wp::set_error_string(
+            "Version mismatch detected in Warp native library.\n"
+            "  Expected Warp version: %s\n"
+            "  Loaded native library version: %s\n"
+            "  This may occur due to environment variables or multiple Warp installations.",
+            expected_version, WP_VERSION_STRING
+        );
+        return 1;
+    }
+
+#if WP_ENABLE_CUDA
+    int cuda_init(void);
+    // note: it's safe to proceed even if CUDA initialization failed
+    cuda_init();
+#endif
+
+    return 0;
+}
+
+void wp_shutdown() { }
+
+const char* wp_version() { return WP_VERSION_STRING; }
+
+const char* wp_get_error_string() { return wp::get_error_string(); }
+
+void wp_set_error_output_enabled(int enable) { wp::set_error_output_enabled(bool(enable)); }
+
+int wp_is_error_output_enabled() { return int(wp::is_error_output_enabled()); }
+
+int wp_is_cuda_enabled() { return int(WP_ENABLE_CUDA); }
+
+int wp_is_cuda_compatibility_enabled() { return int(WP_ENABLE_CUDA_COMPATIBILITY); }
+
+int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }
+
+#ifdef WP_DISABLE_CUBQL
+int wp_is_cubql_enabled() { return 0; }
+#else
+int wp_is_cubql_enabled() { return 1; }
+#endif
+
+int wp_is_debug_enabled() { return int(WP_ENABLE_DEBUG); }
+
+const char* wp_host_compiler_version()
+{
+    static char version[128];
+#if defined(_MSC_VER)
+    snprintf(version, sizeof(version), "MSVC %d.%d", _MSC_VER / 100, _MSC_VER % 100);
+#elif defined(__GNUC__) && !defined(__clang__)
+    snprintf(version, sizeof(version), "GCC %d.%d.%d", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+#elif defined(__clang__)
+    snprintf(version, sizeof(version), "Clang %d.%d.%d", __clang_major__, __clang_minor__, __clang_patchlevel__);
+#else
+    snprintf(version, sizeof(version), "unknown");
+#endif
+    return version;
+}
+
+int wp_is_verify_fp_enabled()
+{
+#ifdef WP_VERIFY_FP
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int wp_is_fast_math_enabled()
+{
+#ifdef WP_FAST_MATH
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+void* wp_alloc_host(size_t s, const char* tag)
+{
+    // increase CPU array alignment for compatibility with other libs, e.g., JAX, XLA, Eigen.
+    size_t alignment = 64;
+
+    void* ptr;
+#if defined(_MSC_VER)
+    ptr = _aligned_malloc(s, alignment);
+#else
+    // posix_memalign() preserves the exact size (unlike aligned_alloc(), which
+    // requires a multiple of the alignment), so ASan red-zones the logical array bound.
+    if (posix_memalign(&ptr, alignment, s) != 0)
+        ptr = nullptr;
+#endif
+
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_HOST, -1, tag);
+    return ptr;
+}
+
+void wp_free_host(void* ptr)
+{
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_free(ptr);
+#if defined(_MSC_VER)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
+
+// CPU kernel launch with optional APIC recording.
+// During capture (g_apic_state is recording), the kernel is NOT executed —
+// only recorded in the APIC byte stream. This matches CUDA graph capture
+// semantics where operations are deferred until capture_launch(). During
+// replay — either from a live capture (wp_apic_cpu_replay_state) or from a
+// loaded .wrp graph (wp_apic_cpu_replay_graph) — g_apic_state is null, so
+// the launch takes the execute-only branch.
+void wp_cpu_launch_kernel(void* func, void* bounds, void* args, void* adj_args, const APICLaunchInfo* apic_info)
+{
+    typedef void (*kernel_fn_forward)(void*, void*);
+    typedef void (*kernel_fn_backward)(void*, void*, void*);
+
+    // Skip execution during capture (record only). Execute during replay
+    // or when called outside capture (apic_info == NULL).
+    APICState* recording_state = wp_apic_get_recording_state();
+    if (func && !recording_state) {
+        if (adj_args)
+            ((kernel_fn_backward)func)(bounds, args, adj_args);
+        else
+            ((kernel_fn_forward)func)(bounds, args);
+    }
+
+    // Record to byte stream (for APIC serialization) if capturing
+    if (recording_state && !apic_info) {
+        fprintf(stderr, "Warp APIC error: kernel launch during capture without APICLaunchInfo\n");
+        return;
+    }
+    if (recording_state && apic_info) {
+        // Extract shape from launch_bounds_t<N>. kernel_dim gives the exact
+        // dimensionality expected by the generated kernel.
+        uint32_t shape[APIC_LAUNCH_MAX_DIMS] = {};
+        int ndim = apic_info->kernel_dim;
+        if (ndim < 1)
+            ndim = 1;
+        if (ndim > APIC_LAUNCH_MAX_DIMS)
+            ndim = APIC_LAUNCH_MAX_DIMS;
+
+        uint64_t launch_size = 0;
+        if (bounds && ndim > 0) {
+            const uint32_t* bounds_shape = static_cast<const uint32_t*>(bounds);
+            for (int d = 0; d < ndim; d++)
+                shape[d] = bounds_shape[d];
+
+            const size_t size_offset = apic_detail::launch_bounds_size_offset(ndim);
+            const uint8_t* bounds_bytes = static_cast<const uint8_t*>(bounds);
+            launch_size = *reinterpret_cast<const size_t*>(bounds_bytes + size_offset);
+        }
+
+        apic_record_kernel_launch(
+            recording_state, apic_info->kernel_key, apic_info->module_hash, apic_info->is_forward, shape, ndim,
+            launch_size, 0, 0, 0, 1,
+            0,  // max_blocks, block_dim, grid_stride, cluster_dim, smem_bytes (not applicable for CPU)
+            apic_info->params, apic_info->num_params, apic_info->adj_params, apic_info->relocs, apic_info->num_relocs,
+            apic_info->value_data, apic_info->value_data_size
+        );
+    }
+}
+
+bool wp_memcpy_h2h(void* dest, void* src, size_t n)
+{
+    // During capture, record only — don't execute (matches CUDA graph semantics)
+    APICState* state = wp_apic_get_recording_state();
+    if (state) {
+        // Zero-byte copy is a no-op; skip recording so we don't auto-register
+        // a stray region for a possibly-null pointer.
+        if (n == 0)
+            return true;
+        APICAddress dst_addr = apic_resolve_host_ptr(state, (uint64_t)dest, n);
+        APICAddress src_addr = apic_resolve_host_ptr(state, (uint64_t)src, n);
+        apic_record_memcpy_d2d(state, dst_addr.region_id, dst_addr.offset, src_addr.region_id, src_addr.offset, n);
+        return true;
+    }
+
+    memcpy(dest, src, n);
+    return true;
+}
+
+bool wp_memset_host(void* dest, int value, size_t n)
+{
+    // During capture, record only — don't execute (matches CUDA graph semantics)
+    APICState* state = wp_apic_get_recording_state();
+    if (state) {
+        // Zero-byte memset is a no-op; skip recording so we don't auto-register
+        // a stray region for a possibly-null pointer.
+        if (n == 0)
+            return true;
+        APICAddress addr = apic_resolve_host_ptr(state, (uint64_t)dest, n);
+        apic_record_memset(state, addr.region_id, addr.offset, n, value);
+        return true;
+    }
+
+    memset(dest, value, n);
+    return true;
+}
+
+// fill memory buffer with a value: this is a faster memtile variant
+// for types bigger than one byte, but requires proper alignment of dst
+template <typename T> void memtile_value_host(T* dst, T value, size_t n)
+{
+    while (n--)
+        *dst++ = value;
+}
+
+void wp_memtile_host(void* dst, const void* src, size_t srcsize, size_t n)
+{
+    // During capture, record only — don't execute (matches CUDA graph semantics)
+    APICState* state = wp_apic_get_recording_state();
+    if (state) {
+        // Zero-element / zero-size memtile is a no-op; skip recording so we
+        // don't auto-register a stray region for a possibly-null pointer.
+        if (n == 0 || srcsize == 0)
+            return;
+        // Guard the byte-span multiplication: an overflow would under-register
+        // the region and let replay write past the tracked bounds.
+        if (n > (~static_cast<size_t>(0)) / srcsize)
+            return;
+        APICAddress addr = apic_resolve_host_ptr(state, (uint64_t)dst, srcsize * n);
+        apic_record_memtile(state, addr.region_id, addr.offset, static_cast<uint32_t>(srcsize), src, n);
+        return;
+    }
+
+    size_t dst_addr = reinterpret_cast<size_t>(dst);
+    size_t src_addr = reinterpret_cast<size_t>(src);
+
+    // try memtile_value first because it should be faster, but we need to ensure proper alignment
+    if (srcsize == 8 && (dst_addr & 7) == 0 && (src_addr & 7) == 0)
+        memtile_value_host(reinterpret_cast<int64_t*>(dst), *reinterpret_cast<const int64_t*>(src), n);
+    else if (srcsize == 4 && (dst_addr & 3) == 0 && (src_addr & 3) == 0)
+        memtile_value_host(reinterpret_cast<int32_t*>(dst), *reinterpret_cast<const int32_t*>(src), n);
+    else if (srcsize == 2 && (dst_addr & 1) == 0 && (src_addr & 1) == 0)
+        memtile_value_host(reinterpret_cast<int16_t*>(dst), *reinterpret_cast<const int16_t*>(src), n);
+    else if (srcsize == 1)
+        memset(dst, *reinterpret_cast<const int8_t*>(src), n);
+    else {
+        // generic version
+        while (n--) {
+            memcpy(dst, src, srcsize);
+            dst = (int8_t*)dst + srcsize;
+        }
+    }
+}
+
+static uint64_t apic_scan_access_bytes(int len, int stride, int type_len, uint64_t scalar_size)
+{
+    if (len <= 0)
+        return 0;
+    if (stride < 0 || type_len <= 0 || scalar_size == 0)
+        return 0;
+    return static_cast<uint64_t>(len - 1) * static_cast<uint64_t>(stride)
+        + static_cast<uint64_t>(type_len) * scalar_size;
+}
+
+// Record a host scan into the active APIC byte stream; returns true if the
+// scan was recorded (and therefore should NOT execute), false otherwise. On
+// recording failure (unresolved pointers etc.) we fall through to the live
+// execute so the user-visible behaviour at capture time stays correct.
+static bool apic_capture_array_scan(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, uint8_t dtype, bool inclusive
+)
+{
+    APICState* state = wp_apic_get_recording_state();
+    if (!state)
+        return false;
+    // scan_host treats non-positive lengths as a no-op.
+    if (len <= 0)
+        return true;
+    uint64_t scalar_size = apic_type_size(dtype);
+    uint64_t src_bytes = apic_scan_access_bytes(len, in_stride, type_len, scalar_size);
+    uint64_t dst_bytes = apic_scan_access_bytes(len, out_stride, type_len, scalar_size);
+    if (src_bytes == 0 || dst_bytes == 0)
+        return false;
+    APICAddress dst_addr = apic_resolve_host_ptr(state, out, dst_bytes);
+    APICAddress src_addr = apic_resolve_host_ptr(state, in, src_bytes);
+    apic_record_scan(
+        state, dst_addr.region_id, dst_addr.offset, src_addr.region_id, src_addr.offset, static_cast<uint32_t>(len),
+        in_stride, out_stride, type_len, dtype, inclusive ? uint8_t(1) : uint8_t(0)
+    );
+    return true;
+}
+
+void wp_array_scan_int_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT32, inclusive))
+        return;
+    scan_host((const int*)in, (int*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_int64_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_INT64, inclusive))
+        return;
+    scan_host((const int64_t*)in, (int64_t*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_float_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT32, inclusive))
+        return;
+    scan_host((const float*)in, (float*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+void wp_array_scan_double_host(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    if (apic_capture_array_scan(in, out, len, in_stride, out_stride, type_len, APIC_TYPE_FLOAT64, inclusive))
+        return;
+    scan_host((const double*)in, (double*)out, len, in_stride, out_stride, type_len, inclusive);
+}
+
+
+static void array_copy_nd(
+    void* dst,
+    const void* src,
+    const int* dst_strides,
+    const int* src_strides,
+    const int* const* dst_indices,
+    const int* const* src_indices,
+    const int* shape,
+    int ndim,
+    size_t elem_size
+)
+{
+    if (ndim == 1) {
+        for (int i = 0; i < shape[0]; i++) {
+            size_t src_idx = src_indices[0] ? src_indices[0][i] : i;
+            size_t dst_idx = dst_indices[0] ? dst_indices[0][i] : i;
+            const char* p = (const char*)src + src_idx * src_strides[0];
+            char* q = (char*)dst + dst_idx * dst_strides[0];
+            // copy element
+            memcpy(q, p, elem_size);
+        }
+    } else {
+        for (int i = 0; i < shape[0]; i++) {
+            size_t src_idx = src_indices[0] ? src_indices[0][i] : i;
+            size_t dst_idx = dst_indices[0] ? dst_indices[0][i] : i;
+            const char* p = (const char*)src + src_idx * src_strides[0];
+            char* q = (char*)dst + dst_idx * dst_strides[0];
+            // recurse on next inner dimension
+            array_copy_nd(
+                q, p, dst_strides + 1, src_strides + 1, dst_indices + 1, src_indices + 1, shape + 1, ndim - 1, elem_size
+            );
+        }
+    }
+}
+
+
+static void array_copy_to_fabric(
+    wp::fabricarray_t<void>& dst, const void* src_data, size_t src_stride, const int* src_indices, size_t elem_size
+)
+{
+    const int8_t* src_ptr = static_cast<const int8_t*>(src_data);
+
+    if (src_indices) {
+        // copy from indexed array
+        for (size_t i = 0; i < dst.nbuckets; i++) {
+            const wp::fabricbucket_t& bucket = dst.buckets[i];
+            int8_t* dst_ptr = static_cast<int8_t*>(bucket.ptr);
+            size_t bucket_size = bucket.index_end - bucket.index_start;
+            for (size_t j = 0; j < bucket_size; j++) {
+                size_t idx = *src_indices;
+                memcpy(dst_ptr, src_ptr + idx * elem_size, elem_size);
+                dst_ptr += elem_size;
+                ++src_indices;
+            }
+        }
+    } else {
+        if (src_stride == elem_size) {
+            // copy from contiguous array
+            for (size_t i = 0; i < dst.nbuckets; i++) {
+                const wp::fabricbucket_t& bucket = dst.buckets[i];
+                size_t num_bytes = (bucket.index_end - bucket.index_start) * elem_size;
+                memcpy(bucket.ptr, src_ptr, num_bytes);
+                src_ptr += num_bytes;
+            }
+        } else {
+            // copy from strided array
+            for (size_t i = 0; i < dst.nbuckets; i++) {
+                const wp::fabricbucket_t& bucket = dst.buckets[i];
+                int8_t* dst_ptr = static_cast<int8_t*>(bucket.ptr);
+                size_t bucket_size = bucket.index_end - bucket.index_start;
+                for (size_t j = 0; j < bucket_size; j++) {
+                    memcpy(dst_ptr, src_ptr, elem_size);
+                    src_ptr += src_stride;
+                    dst_ptr += elem_size;
+                }
+            }
+        }
+    }
+}
+
+static void array_copy_from_fabric(
+    const wp::fabricarray_t<void>& src, void* dst_data, size_t dst_stride, const int* dst_indices, size_t elem_size
+)
+{
+    int8_t* dst_ptr = static_cast<int8_t*>(dst_data);
+
+    if (dst_indices) {
+        // copy to indexed array
+        for (size_t i = 0; i < src.nbuckets; i++) {
+            const wp::fabricbucket_t& bucket = src.buckets[i];
+            const int8_t* src_ptr = static_cast<const int8_t*>(bucket.ptr);
+            size_t bucket_size = bucket.index_end - bucket.index_start;
+            for (size_t j = 0; j < bucket_size; j++) {
+                int idx = *dst_indices;
+                memcpy(dst_ptr + idx * elem_size, src_ptr, elem_size);
+                src_ptr += elem_size;
+                ++dst_indices;
+            }
+        }
+    } else {
+        if (dst_stride == elem_size) {
+            // copy to contiguous array
+            for (size_t i = 0; i < src.nbuckets; i++) {
+                const wp::fabricbucket_t& bucket = src.buckets[i];
+                size_t num_bytes = (bucket.index_end - bucket.index_start) * elem_size;
+                memcpy(dst_ptr, bucket.ptr, num_bytes);
+                dst_ptr += num_bytes;
+            }
+        } else {
+            // copy to strided array
+            for (size_t i = 0; i < src.nbuckets; i++) {
+                const wp::fabricbucket_t& bucket = src.buckets[i];
+                const int8_t* src_ptr = static_cast<const int8_t*>(bucket.ptr);
+                size_t bucket_size = bucket.index_end - bucket.index_start;
+                for (size_t j = 0; j < bucket_size; j++) {
+                    memcpy(dst_ptr, src_ptr, elem_size);
+                    dst_ptr += dst_stride;
+                    src_ptr += elem_size;
+                }
+            }
+        }
+    }
+}
+
+static void
+array_copy_fabric_to_fabric(wp::fabricarray_t<void>& dst, const wp::fabricarray_t<void>& src, size_t elem_size)
+{
+    wp::fabricbucket_t* dst_bucket = dst.buckets;
+    const wp::fabricbucket_t* src_bucket = src.buckets;
+    int8_t* dst_ptr = static_cast<int8_t*>(dst_bucket->ptr);
+    const int8_t* src_ptr = static_cast<const int8_t*>(src_bucket->ptr);
+    size_t dst_remaining = dst_bucket->index_end - dst_bucket->index_start;
+    size_t src_remaining = src_bucket->index_end - src_bucket->index_start;
+    size_t total_copied = 0;
+
+    while (total_copied < dst.size) {
+        if (dst_remaining <= src_remaining) {
+            // copy to destination bucket
+            size_t num_elems = dst_remaining;
+            size_t num_bytes = num_elems * elem_size;
+            memcpy(dst_ptr, src_ptr, num_bytes);
+
+            // advance to next destination bucket
+            ++dst_bucket;
+            dst_ptr = static_cast<int8_t*>(dst_bucket->ptr);
+            dst_remaining = dst_bucket->index_end - dst_bucket->index_start;
+
+            // advance source offset
+            src_ptr += num_bytes;
+            src_remaining -= num_elems;
+
+            total_copied += num_elems;
+        } else {
+            // copy to destination bucket
+            size_t num_elems = src_remaining;
+            size_t num_bytes = num_elems * elem_size;
+            memcpy(dst_ptr, src_ptr, num_bytes);
+
+            // advance to next source bucket
+            ++src_bucket;
+            src_ptr = static_cast<const int8_t*>(src_bucket->ptr);
+            src_remaining = src_bucket->index_end - src_bucket->index_start;
+
+            // advance destination offset
+            dst_ptr += num_bytes;
+            dst_remaining -= num_elems;
+
+            total_copied += num_elems;
+        }
+    }
+}
+
+
+static void array_copy_to_fabric_indexed(
+    wp::indexedfabricarray_t<void>& dst,
+    const void* src_data,
+    size_t src_stride,
+    const int* src_indices,
+    size_t elem_size
+)
+{
+    const int8_t* src_ptr = static_cast<const int8_t*>(src_data);
+
+    if (src_indices) {
+        // copy from indexed array
+        for (size_t i = 0; i < dst.size; i++) {
+            size_t src_idx = src_indices[i];
+            size_t dst_idx = dst.indices[i];
+            void* dst_ptr = fabricarray_element_ptr(dst.fa, dst_idx, elem_size);
+            memcpy(dst_ptr, src_ptr + dst_idx * elem_size, elem_size);
+        }
+    } else {
+        // copy from contiguous/strided array
+        for (size_t i = 0; i < dst.size; i++) {
+            size_t dst_idx = dst.indices[i];
+            void* dst_ptr = fabricarray_element_ptr(dst.fa, dst_idx, elem_size);
+            if (dst_ptr) {
+                memcpy(dst_ptr, src_ptr, elem_size);
+                src_ptr += src_stride;
+            }
+        }
+    }
+}
+
+
+static void array_copy_fabric_indexed_to_fabric(
+    wp::fabricarray_t<void>& dst, const wp::indexedfabricarray_t<void>& src, size_t elem_size
+)
+{
+    wp::fabricbucket_t* dst_bucket = dst.buckets;
+    int8_t* dst_ptr = static_cast<int8_t*>(dst_bucket->ptr);
+    int8_t* dst_end = dst_ptr + elem_size * (dst_bucket->index_end - dst_bucket->index_start);
+
+    for (size_t i = 0; i < src.size; i++) {
+        size_t src_idx = src.indices[i];
+        const void* src_ptr = fabricarray_element_ptr(src.fa, src_idx, elem_size);
+
+        if (dst_ptr >= dst_end) {
+            // advance to next destination bucket
+            ++dst_bucket;
+            dst_ptr = static_cast<int8_t*>(dst_bucket->ptr);
+            dst_end = dst_ptr + elem_size * (dst_bucket->index_end - dst_bucket->index_start);
+        }
+
+        memcpy(dst_ptr, src_ptr, elem_size);
+
+        dst_ptr += elem_size;
+    }
+}
+
+
+static void array_copy_fabric_indexed_to_fabric_indexed(
+    wp::indexedfabricarray_t<void>& dst, const wp::indexedfabricarray_t<void>& src, size_t elem_size
+)
+{
+    for (size_t i = 0; i < src.size; i++) {
+        size_t src_idx = src.indices[i];
+        size_t dst_idx = dst.indices[i];
+
+        const void* src_ptr = fabricarray_element_ptr(src.fa, src_idx, elem_size);
+        void* dst_ptr = fabricarray_element_ptr(dst.fa, dst_idx, elem_size);
+
+        memcpy(dst_ptr, src_ptr, elem_size);
+    }
+}
+
+
+static void array_copy_fabric_to_fabric_indexed(
+    wp::indexedfabricarray_t<void>& dst, const wp::fabricarray_t<void>& src, size_t elem_size
+)
+{
+    wp::fabricbucket_t* src_bucket = src.buckets;
+    const int8_t* src_ptr = static_cast<const int8_t*>(src_bucket->ptr);
+    const int8_t* src_end = src_ptr + elem_size * (src_bucket->index_end - src_bucket->index_start);
+
+    for (size_t i = 0; i < dst.size; i++) {
+        size_t dst_idx = dst.indices[i];
+        void* dst_ptr = fabricarray_element_ptr(dst.fa, dst_idx, elem_size);
+
+        if (src_ptr >= src_end) {
+            // advance to next source bucket
+            ++src_bucket;
+            src_ptr = static_cast<int8_t*>(src_bucket->ptr);
+            src_end = src_ptr + elem_size * (src_bucket->index_end - src_bucket->index_start);
+        }
+
+        memcpy(dst_ptr, src_ptr, elem_size);
+
+        src_ptr += elem_size;
+    }
+}
+
+
+static void array_copy_from_fabric_indexed(
+    const wp::indexedfabricarray_t<void>& src,
+    void* dst_data,
+    size_t dst_stride,
+    const int* dst_indices,
+    size_t elem_size
+)
+{
+    int8_t* dst_ptr = static_cast<int8_t*>(dst_data);
+
+    if (dst_indices) {
+        // copy to indexed array
+        for (size_t i = 0; i < src.size; i++) {
+            size_t idx = src.indices[i];
+            if (idx < src.fa.size) {
+                const void* src_ptr = fabricarray_element_ptr(src.fa, idx, elem_size);
+                size_t dst_idx = dst_indices[i];
+                memcpy(dst_ptr + dst_idx * elem_size, src_ptr, elem_size);
+            } else {
+                fprintf(
+                    stderr, "Warp copy error: Source index %llu is out of bounds for fabric array of size %llu",
+                    (unsigned long long)idx, (unsigned long long)src.fa.size
+                );
+            }
+        }
+    } else {
+        // copy to contiguous/strided array
+        for (size_t i = 0; i < src.size; i++) {
+            size_t idx = src.indices[i];
+            if (idx < src.fa.size) {
+                const void* src_ptr = fabricarray_element_ptr(src.fa, idx, elem_size);
+                memcpy(dst_ptr, src_ptr, elem_size);
+                dst_ptr += dst_stride;
+            } else {
+                fprintf(
+                    stderr, "Warp copy error: Source index %llu is out of bounds for fabric array of size %llu",
+                    (unsigned long long)idx, (unsigned long long)src.fa.size
+                );
+            }
+        }
+    }
+}
+
+
+WP_API bool wp_array_copy_host(void* dst, void* src, int dst_type, int src_type, int elem_size)
+{
+    if (!src || !dst)
+        return false;
+
+    const void* src_data = NULL;
+    void* dst_data = NULL;
+    int src_ndim = 0;
+    int dst_ndim = 0;
+    const int* src_shape = NULL;
+    const int* dst_shape = NULL;
+    const int* src_strides = NULL;
+    const int* dst_strides = NULL;
+    const int* const* src_indices = NULL;
+    const int* const* dst_indices = NULL;
+
+    const wp::fabricarray_t<void>* src_fabricarray = NULL;
+    wp::fabricarray_t<void>* dst_fabricarray = NULL;
+
+    const wp::indexedfabricarray_t<void>* src_indexedfabricarray = NULL;
+    wp::indexedfabricarray_t<void>* dst_indexedfabricarray = NULL;
+
+    const int* null_indices[wp::ARRAY_MAX_DIMS] = { NULL };
+
+    if (src_type == wp::ARRAY_TYPE_REGULAR) {
+        const wp::array_t<void>& src_arr = *static_cast<const wp::array_t<void>*>(src);
+        src_data = src_arr.data;
+        src_ndim = src_arr.ndim;
+        src_shape = src_arr.shape.dims;
+        src_strides = src_arr.strides;
+        src_indices = null_indices;
+    } else if (src_type == wp::ARRAY_TYPE_INDEXED) {
+        const wp::indexedarray_t<void>& src_arr = *static_cast<const wp::indexedarray_t<void>*>(src);
+        src_data = src_arr.arr.data;
+        src_ndim = src_arr.arr.ndim;
+        src_shape = src_arr.shape.dims;
+        src_strides = src_arr.arr.strides;
+        src_indices = src_arr.indices;
+    } else if (src_type == wp::ARRAY_TYPE_FABRIC) {
+        src_fabricarray = static_cast<const wp::fabricarray_t<void>*>(src);
+        src_ndim = 1;
+    } else if (src_type == wp::ARRAY_TYPE_FABRIC_INDEXED) {
+        src_indexedfabricarray = static_cast<const wp::indexedfabricarray_t<void>*>(src);
+        src_ndim = 1;
+    } else {
+        fprintf(stderr, "Warp copy error: Invalid source array type (%d)\n", src_type);
+        return false;
+    }
+
+    if (dst_type == wp::ARRAY_TYPE_REGULAR) {
+        const wp::array_t<void>& dst_arr = *static_cast<const wp::array_t<void>*>(dst);
+        dst_data = dst_arr.data;
+        dst_ndim = dst_arr.ndim;
+        dst_shape = dst_arr.shape.dims;
+        dst_strides = dst_arr.strides;
+        dst_indices = null_indices;
+    } else if (dst_type == wp::ARRAY_TYPE_INDEXED) {
+        const wp::indexedarray_t<void>& dst_arr = *static_cast<const wp::indexedarray_t<void>*>(dst);
+        dst_data = dst_arr.arr.data;
+        dst_ndim = dst_arr.arr.ndim;
+        dst_shape = dst_arr.shape.dims;
+        dst_strides = dst_arr.arr.strides;
+        dst_indices = dst_arr.indices;
+    } else if (dst_type == wp::ARRAY_TYPE_FABRIC) {
+        dst_fabricarray = static_cast<wp::fabricarray_t<void>*>(dst);
+        dst_ndim = 1;
+    } else if (dst_type == wp::ARRAY_TYPE_FABRIC_INDEXED) {
+        dst_indexedfabricarray = static_cast<wp::indexedfabricarray_t<void>*>(dst);
+        dst_ndim = 1;
+    } else {
+        fprintf(stderr, "Warp copy error: Invalid destination array type (%d)\n", dst_type);
+        return false;
+    }
+
+    if (src_ndim != dst_ndim) {
+        fprintf(stderr, "Warp copy error: Incompatible array dimensionalities (%d and %d)\n", src_ndim, dst_ndim);
+        return false;
+    }
+
+    // handle fabric arrays
+    if (dst_fabricarray) {
+        size_t n = dst_fabricarray->size;
+        if (src_fabricarray) {
+            // copy from fabric to fabric
+            if (src_fabricarray->size != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_fabric_to_fabric(*dst_fabricarray, *src_fabricarray, elem_size);
+            return true;
+        } else if (src_indexedfabricarray) {
+            // copy from fabric indexed to fabric
+            if (src_indexedfabricarray->size != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_fabric_indexed_to_fabric(*dst_fabricarray, *src_indexedfabricarray, elem_size);
+            return true;
+        } else {
+            // copy to fabric
+            if (size_t(src_shape[0]) != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_to_fabric(*dst_fabricarray, src_data, src_strides[0], src_indices[0], elem_size);
+            return true;
+        }
+    } else if (dst_indexedfabricarray) {
+        size_t n = dst_indexedfabricarray->size;
+        if (src_fabricarray) {
+            // copy from fabric to fabric indexed
+            if (src_fabricarray->size != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_fabric_to_fabric_indexed(*dst_indexedfabricarray, *src_fabricarray, elem_size);
+            return true;
+        } else if (src_indexedfabricarray) {
+            // copy from fabric indexed to fabric indexed
+            if (src_indexedfabricarray->size != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_fabric_indexed_to_fabric_indexed(*dst_indexedfabricarray, *src_indexedfabricarray, elem_size);
+            return true;
+        } else {
+            // copy to fabric indexed
+            if (size_t(src_shape[0]) != n) {
+                fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+                return false;
+            }
+            array_copy_to_fabric_indexed(*dst_indexedfabricarray, src_data, src_strides[0], src_indices[0], elem_size);
+            return true;
+        }
+    } else if (src_fabricarray) {
+        // copy from fabric
+        size_t n = src_fabricarray->size;
+        if (size_t(dst_shape[0]) != n) {
+            fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+            return false;
+        }
+        array_copy_from_fabric(*src_fabricarray, dst_data, dst_strides[0], dst_indices[0], elem_size);
+        return true;
+    } else if (src_indexedfabricarray) {
+        // copy from fabric indexed
+        size_t n = src_indexedfabricarray->size;
+        if (size_t(dst_shape[0]) != n) {
+            fprintf(stderr, "Warp copy error: Incompatible array sizes\n");
+            return false;
+        }
+        array_copy_from_fabric_indexed(*src_indexedfabricarray, dst_data, dst_strides[0], dst_indices[0], elem_size);
+        return true;
+    }
+
+    for (int i = 0; i < src_ndim; i++) {
+        if (src_shape[i] != dst_shape[i]) {
+            fprintf(stderr, "Warp copy error: Incompatible array shapes\n");
+            return 0;
+        }
+    }
+
+    array_copy_nd(
+        dst_data, src_data, dst_strides, src_strides, dst_indices, src_indices, src_shape, src_ndim, elem_size
+    );
+
+    return true;
+}
+
+
+static void
+array_fill_strided(void* data, const int* shape, const int* strides, int ndim, const void* value, size_t value_size)
+{
+    size_t stride = strides[0];
+    if (ndim == 1) {
+        char* p = (char*)data;
+        for (int i = 0; i < shape[0]; i++) {
+            memcpy(p, value, value_size);
+            p += stride;
+        }
+    } else {
+        for (int i = 0; i < shape[0]; i++) {
+            char* p = (char*)data + i * stride;
+            // recurse on next inner dimension
+            array_fill_strided(p, shape + 1, strides + 1, ndim - 1, value, value_size);
+        }
+    }
+}
+
+
+static void array_fill_indexed(
+    void* data,
+    const int* shape,
+    const int* strides,
+    const int* const* indices,
+    int ndim,
+    const void* value,
+    size_t value_size
+)
+{
+    size_t stride = strides[0];
+    if (ndim == 1) {
+        for (int i = 0; i < shape[0]; i++) {
+            size_t idx = indices[0] ? indices[0][i] : i;
+            char* p = (char*)data + idx * stride;
+            memcpy(p, value, value_size);
+        }
+    } else {
+        for (int i = 0; i < shape[0]; i++) {
+            size_t idx = indices[0] ? indices[0][i] : i;
+            char* p = (char*)data + idx * stride;
+            // recurse on next inner dimension
+            array_fill_indexed(p, shape + 1, strides + 1, indices + 1, ndim - 1, value, value_size);
+        }
+    }
+}
+
+
+static void array_fill_fabric(wp::fabricarray_t<void>& fa, const void* value_ptr, size_t value_size)
+{
+    for (size_t i = 0; i < fa.nbuckets; i++) {
+        const wp::fabricbucket_t& bucket = fa.buckets[i];
+        size_t bucket_size = bucket.index_end - bucket.index_start;
+        wp_memtile_host(bucket.ptr, value_ptr, value_size, bucket_size);
+    }
+}
+
+
+static void array_fill_fabric_indexed(wp::indexedfabricarray_t<void>& ifa, const void* value_ptr, size_t value_size)
+{
+    for (size_t i = 0; i < ifa.size; i++) {
+        size_t idx = size_t(ifa.indices[i]);
+        if (idx < ifa.fa.size) {
+            void* p = fabricarray_element_ptr(ifa.fa, idx, value_size);
+            memcpy(p, value_ptr, value_size);
+        }
+    }
+}
+
+
+WP_API void wp_array_fill_host(void* arr_ptr, int arr_type, const void* value_ptr, int value_size)
+{
+    if (!arr_ptr || !value_ptr)
+        return;
+
+    if (arr_type == wp::ARRAY_TYPE_REGULAR) {
+        wp::array_t<void>& arr = *static_cast<wp::array_t<void>*>(arr_ptr);
+        array_fill_strided(arr.data, arr.shape.dims, arr.strides, arr.ndim, value_ptr, value_size);
+    } else if (arr_type == wp::ARRAY_TYPE_INDEXED) {
+        wp::indexedarray_t<void>& ia = *static_cast<wp::indexedarray_t<void>*>(arr_ptr);
+        array_fill_indexed(ia.arr.data, ia.shape.dims, ia.arr.strides, ia.indices, ia.arr.ndim, value_ptr, value_size);
+    } else if (arr_type == wp::ARRAY_TYPE_FABRIC) {
+        wp::fabricarray_t<void>& fa = *static_cast<wp::fabricarray_t<void>*>(arr_ptr);
+        array_fill_fabric(fa, value_ptr, value_size);
+    } else if (arr_type == wp::ARRAY_TYPE_FABRIC_INDEXED) {
+        wp::indexedfabricarray_t<void>& ifa = *static_cast<wp::indexedfabricarray_t<void>*>(arr_ptr);
+        array_fill_fabric_indexed(ifa, value_ptr, value_size);
+    } else {
+        fprintf(stderr, "Warp fill error: Invalid array type id %d\n", arr_type);
+    }
+}
+
+
+// stubs for platforms where there is no CUDA
+#if !WP_ENABLE_CUDA
+
+void* wp_alloc_pinned(size_t s, const char* tag) { return wp_alloc_host(s, tag); }
+
+void wp_free_pinned(void* ptr) { wp_free_host(ptr); }
+
+void* wp_alloc_device(void* context, size_t s, const char* tag) { return NULL; }
+
+void* wp_alloc_device_default(void* context, size_t s, const char* tag) { return NULL; }
+
+void* wp_alloc_device_async(void* context, size_t s, void* stream, const char* tag) { return NULL; }
+
+void* wp_alloc_device_managed(void* context, size_t s, const char* tag) { return NULL; }
+
+void wp_free_device(void* context, void* ptr) { }
+
+void wp_free_device_default(void* context, void* ptr) { }
+
+void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret) { }
+
+bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream) { return false; }
+
+bool wp_memcpy_d2h(void* context, void* dest, void* src, size_t n, void* stream) { return false; }
+
+bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream) { return false; }
+
+bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, size_t n, void* stream) { return false; }
+
+bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, size_t count, void* stream)
+{
+    return false;
+}
+
+bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream) { return false; }
+
+void wp_memtile_device(void* context, void* dest, const void* src, size_t srcsize, size_t n) { }
+
+bool wp_array_copy_device(void* context, void* dst, void* src, int dst_type, int src_type, int elem_size)
+{
+    return false;
+}
+
+void wp_array_fill_device(void* context, void* arr, int arr_type, const void* value, int value_size) { }
+
+WP_API int wp_cuda_driver_version() { return 0; }
+WP_API int wp_cuda_toolkit_version() { return 0; }
+
+WP_API bool wp_cuda_driver_is_initialized() { return false; }
+
+WP_API int wp_nvrtc_supported_arch_count() { return 0; }
+WP_API void wp_nvrtc_supported_archs(int* archs) { }
+
+WP_API int wp_cuda_device_get_count() { return 0; }
+WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
+WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
+WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_max_shared_memory(int ordinal) { return 0; }
+WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
+WP_API int wp_cuda_device_get_pci_domain_id(int ordinal) { return -1; }
+WP_API int wp_cuda_device_get_pci_bus_id(int ordinal) { return -1; }
+WP_API int wp_cuda_device_get_pci_device_id(int ordinal) { return -1; }
+WP_API int wp_cuda_device_is_uva(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_pageable_memory_access(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_direct_managed_mem_access_from_host(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr) { return WP_MEMORY_KIND_UNKNOWN; }
+WP_API int wp_cuda_device_is_mempool_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_is_ipc_supported(int ordinal) { return 0; }
+WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold) { return 0; }
+WP_API uint64_t wp_cuda_device_get_mempool_release_threshold(int ordinal) { return 0; }
+WP_API uint64_t wp_cuda_device_get_mempool_used_mem_current(int ordinal) { return 0; }
+WP_API uint64_t wp_cuda_device_get_mempool_used_mem_high(int ordinal) { return 0; }
+WP_API uint64_t wp_cuda_device_get_graph_mem_current(int ordinal) { return 0; }
+WP_API void wp_cuda_device_graph_mem_trim(int ordinal) { }
+WP_API void wp_cuda_device_get_memory_info(int ordinal, size_t* free_mem, size_t* total_mem) { }
+
+WP_API void* wp_cuda_context_get_current() { return NULL; }
+WP_API void wp_cuda_context_set_current(void* ctx) { }
+WP_API void wp_cuda_context_push_current(void* context) { }
+WP_API void wp_cuda_context_pop_current() { }
+WP_API void* wp_cuda_context_create(int device_ordinal) { return NULL; }
+WP_API void wp_cuda_context_destroy(void* context) { }
+WP_API void wp_cuda_context_synchronize(void* context) { }
+WP_API bool wp_cuda_profiler_start(void* context) { return true; }
+WP_API bool wp_cuda_profiler_stop(void* context) { return true; }
+WP_API uint64_t wp_cuda_context_check(void* context) { return 0; }
+WP_API int wp_cuda_context_get_device_ordinal(void* context) { return -1; }
+WP_API int wp_cuda_context_is_primary(void* context) { return 0; }
+WP_API void* wp_cuda_context_get_stream(void* context) { return NULL; }
+WP_API void wp_cuda_context_set_stream(void* context, void* stream, int sync) { }
+
+WP_API int wp_cuda_is_peer_access_supported(int target_ordinal, int peer_ordinal) { return 0; }
+WP_API int wp_cuda_is_peer_access_enabled(void* target_context, void* peer_context) { return 0; }
+WP_API int wp_cuda_set_peer_access_enabled(void* target_context, void* peer_context, int enable) { return 0; }
+WP_API int wp_cuda_is_mempool_access_enabled(int target_ordinal, int peer_ordinal) { return 0; }
+WP_API int wp_cuda_set_mempool_access_enabled(int target_ordinal, int peer_ordinal, int enable) { return 0; }
+
+WP_API void wp_cuda_ipc_get_mem_handle(void* ptr, char* out_buffer) { }
+WP_API void* wp_cuda_ipc_open_mem_handle(void* context, char* handle) { return NULL; }
+WP_API void wp_cuda_ipc_close_mem_handle(void* ptr) { }
+WP_API void wp_cuda_ipc_get_event_handle(void* context, void* event, char* out_buffer) { }
+WP_API void* wp_cuda_ipc_open_event_handle(void* context, char* handle) { return NULL; }
+
+WP_API void* wp_cuda_stream_create(void* context, int priority) { return NULL; }
+WP_API void wp_cuda_stream_destroy(void* context, void* stream) { }
+WP_API int wp_cuda_stream_query(void* stream) { return 0; }
+WP_API void wp_cuda_stream_register(void* context, void* stream) { }
+WP_API void wp_cuda_stream_unregister(void* context, void* stream) { }
+WP_API void* wp_cuda_stream_get_current() { return NULL; }
+WP_API void wp_cuda_stream_synchronize(void* stream) { }
+WP_API void wp_cuda_stream_wait_event(void* stream, void* event, bool external) { }
+WP_API void wp_cuda_stream_wait_stream(void* stream, void* other_stream, void* event, bool external) { }
+WP_API int wp_cuda_stream_is_capturing(void* stream) { return 0; }
+WP_API int wp_cuda_stream_is_blocking(void* stream) { return 0; }
+WP_API int wp_cuda_thread_exchange_capture_mode(int mode) { return mode; }
+WP_API uint64_t wp_cuda_stream_get_capture_id(void* stream) { return 0; }
+WP_API int wp_cuda_stream_get_priority(void* stream) { return 0; }
+
+WP_API void* wp_cuda_event_create(void* context, unsigned flags) { return NULL; }
+WP_API void wp_cuda_event_destroy(void* event) { }
+WP_API int wp_cuda_event_query(void* event) { return 0; }
+WP_API void wp_cuda_event_record(void* event, void* stream, bool external) { }
+WP_API void wp_cuda_event_synchronize(void* event) { }
+WP_API float wp_cuda_event_elapsed_time(void* start_event, void* end_event) { return 0.0f; }
+
+WP_API bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int mode) { return false; }
+WP_API bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret) { return false; }
+WP_API bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** graph_exec_ret) { return false; }
+WP_API bool wp_cuda_graph_launch(void* graph, void* stream) { return false; }
+WP_API bool wp_cuda_graph_destroy(void* context, void* graph) { return false; }
+WP_API bool wp_cuda_graph_exec_destroy(void* context, void* graph_exec) { return false; }
+WP_API bool wp_capture_debug_dot_print(void* graph, const char* path, uint32_t flags) { return false; }
+
+WP_API bool wp_cuda_graph_insert_if_else(
+    void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
+)
+{
+    return false;
+}
+WP_API bool wp_cuda_graph_insert_while(
+    void* context, void* stream, int arch, bool use_ptx, int* condition, void** body_graph_ret, uint64_t* handle_ret
+)
+{
+    return false;
+}
+WP_API bool
+wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
+{
+    return false;
+}
+WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret) { return false; }
+WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph) { return false; }
+WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph) { return false; }
+WP_API bool wp_cuda_graph_check_conditional_body(void* body_graph) { return false; }
+
+WP_API void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t size, int kind)
+{
+    return NULL;
+}
+WP_API bool wp_cuda_graph_insert_memcpy_batch(
+    void* context, void* stream, void** dsts, void** srcs, size_t* sizes, int* kinds, int count, void** nodes_ret
+)
+{
+    return false;
+}
+WP_API bool wp_cuda_graph_update_memcpy(void* graph_exec, void* node, void* dst, void* src, size_t size, int kind)
+{
+    return false;
+}
+WP_API bool wp_cuda_graph_update_memcpy_batch(
+    void* graph_exec, void** nodes, void** dsts, void** srcs, size_t* sizes, int* kinds, int count
+)
+{
+    return false;
+}
+
+WP_API void* wp_cuda_graph_insert_alloc_node(void* context, size_t size) { return NULL; }
+WP_API void* wp_cuda_graph_insert_free_node(void* context, void* alloc_node) { return NULL; }
+WP_API void* wp_cuda_graph_insert_empty_node(void* context) { return NULL; }
+WP_API int wp_cuda_graph_node_depends_on(void* argument, void* referent) { return -1; }
+WP_API int wp_cuda_graph_alloc_query(void* alloc, void* arg) { return -1; }
+
+WP_API size_t wp_cuda_compile_program(
+    const char* cuda_src,
+    const char* program_name,
+    int arch,
+    const char* arch_suffix,
+    const char* include_dir,
+    int num_cuda_include_dirs,
+    const char** cuda_include_dirs,
+    bool debug,
+    int optimization_level,
+    bool verbose,
+    bool verify_fp,
+    bool fast_math,
+    bool fuse_fp,
+    bool lineinfo,
+    bool compile_time_trace,
+    bool precompiled_headers,
+    const char* output_path,
+    const char* pch_dir,
+    size_t num_ltoirs,
+    char** ltoirs,
+    size_t* ltoir_sizes,
+    int* ltoir_input_types
+)
+{
+    return 0;
+}
+
+WP_API void* wp_cuda_load_module(void* context, const char* ptx) { return NULL; }
+WP_API void wp_cuda_unload_module(void* context, void* module) { }
+WP_API void* wp_cuda_get_kernel(void* context, void* module, const char* name) { return NULL; }
+WP_API size_t wp_cuda_launch_kernel(
+    void* context,
+    void* kernel,
+    size_t dim,
+    int max_blocks,
+    int block_dim,
+    int grid_stride,
+    int cluster_dim,
+    int shared_memory_bytes,
+    void** args,
+    void* stream,
+    const APICLaunchInfo* apic_info
+)
+{
+    return 0;
+}
+
+WP_API bool wp_cuda_get_suggested_block_size(
+    void* context, void* kernel, int shared_memory_bytes, int* block_size_out, int* min_grid_size_out
+)
+{
+    return false;
+}
+WP_API int wp_cuda_get_max_shared_memory(void* context) { return 0; }
+WP_API bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size) { return false; }
+WP_API int wp_cuda_get_kernel_static_shared_memory(void* context, void* kernel) { return -1; }
+WP_API bool wp_cuda_get_kernel_properties(void* context, void* kernel, int* properties, int property_count)
+{
+    return false;
+}
+WP_API bool wp_cuda_set_kernel_cluster_attrs(void* kernel, int cx, int cy, int cz) { return false; }
+WP_API int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int dynamic_smem_bytes) { return 1; }
+
+WP_API void wp_cuda_set_context_restore_policy(bool always_restore) { }
+WP_API int wp_cuda_get_context_restore_policy() { return false; }
+
+WP_API bool wp_array_scan_int_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    return false;
+}
+WP_API bool wp_array_scan_int64_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    return false;
+}
+WP_API bool wp_array_scan_float_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    return false;
+}
+WP_API bool wp_array_scan_double_device(
+    uint64_t in, uint64_t out, int len, int in_stride, int out_stride, int type_len, bool inclusive
+)
+{
+    return false;
+}
+
+WP_API bool wp_cuda_graphics_map(void* context, void* resource) { return false; }
+WP_API void wp_cuda_graphics_unmap(void* context, void* resource) { }
+WP_API void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_t* ptr, size_t* size) { }
+WP_API void* wp_cuda_graphics_register_gl_buffer(void* context, uint32_t gl_buffer, unsigned int flags) { return NULL; }
+WP_API void* wp_cuda_graphics_register_gl_image(void* context, uint32_t image, uint32_t target, unsigned int flags)
+{
+    return NULL;
+}
+WP_API uint64_t wp_cuda_graphics_sub_resource_get_mapped_array(
+    void* context, void* resource, unsigned int array_index, unsigned int mip_level
+)
+{
+    return 0;
+}
+WP_API void wp_cuda_graphics_unregister_resource(void* context, void* resource) { }
+
+WP_API void wp_cuda_timing_begin(int flags) { }
+WP_API int wp_cuda_timing_get_result_count() { return 0; }
+WP_API void wp_cuda_timing_end(timing_result_t* results, int size) { }
+
+WP_API const char* wp_libmathdx_version() { return ""; }
+WP_API int wp_nvrtc_version() { return 0; }
+
+
+#endif  // !WP_ENABLE_CUDA

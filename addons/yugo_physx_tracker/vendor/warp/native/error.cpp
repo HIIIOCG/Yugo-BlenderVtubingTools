@@ -1,0 +1,51 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+namespace wp {
+static char g_error_buffer[4096] = "";
+static bool g_error_output_enabled = true;
+static FILE* g_error_stream = stderr;
+
+const char* get_error_string() { return g_error_buffer; }
+
+void set_error_string(const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(g_error_buffer, sizeof(g_error_buffer), fmt, args);
+    if (g_error_output_enabled) {
+        // note: we deliberately avoid vfprintf() due to problems with runtime glibc mismatch
+        fputs(g_error_buffer, g_error_stream);
+        fputc('\n', g_error_stream);
+        fflush(g_error_stream);
+    }
+    va_end(args);
+}
+
+void append_error_string(const char* fmt, ...)
+{
+    size_t offset = strlen(g_error_buffer);
+    if (offset + 2 > sizeof(g_error_buffer))
+        return;
+    g_error_buffer[offset++] = '\n';
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(g_error_buffer + offset, sizeof(g_error_buffer) - offset, fmt, args);
+    if (g_error_output_enabled) {
+        // note: we deliberately avoid vfprintf() due to problems with runtime glibc mismatch
+        fputs(g_error_buffer + offset, g_error_stream);
+        fputc('\n', g_error_stream);
+        fflush(g_error_stream);
+    }
+    va_end(args);
+}
+
+void set_error_output_enabled(bool enable) { g_error_output_enabled = enable; }
+
+bool is_error_output_enabled() { return g_error_output_enabled; }
+
+}  // end of namespace wp

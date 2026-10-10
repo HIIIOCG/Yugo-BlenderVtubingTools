@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any, ClassVar
+
+import warp as wp
+from warp._src.fem import cache
+from warp._src.fem.polynomial import Polynomial
+from warp._src.fem.types import ElementIndex, make_free_sample
+from warp._src.types import type_is_vector, type_size
+
+from .geometry import Geometry
+
+_mat32 = wp.types.matrix(shape=(3, 2), dtype=float)
+
+
+class DeformedGeometry(Geometry):
+    """Geometry obtained by deforming a base geometry with a displacement field."""
+
+    _dynamic_attribute_constructors_phase_1: ClassVar = {
+        "CellArg": lambda obj: obj._make_cell_arg(),
+        "SideArg": lambda obj: obj._make_side_arg(),
+        "cell_position": lambda obj: obj._make_cell_position(),
+        "cell_deformation_gradient": lambda obj: obj._make_cell_deformation_gradient(),
+        "side_to_cell_arg": lambda obj: obj._make_side_to_cell_arg(),
+        "side_position": lambda obj: obj._make_side_position(),
+        "side_deformation_gradient": lambda obj: obj._make_side_deformation_gradient(),
+        "side_inner_cell_index": lambda obj: obj._make_side_inner_cell_index(),
+        "side_outer_cell_index": lambda obj: obj._make_side_outer_cell_index(),
+        "cell_environment_index": lambda obj: obj._make_cell_environment_index(),
+        "side_environment_index": lambda obj: obj._make_side_environment_index(),
+        "side_inner_cell_coords": lambda obj: obj._make_side_inner_cell_coords(),
+        "side_outer_cell_coords": lambda obj: obj._make_side_outer_cell_coords(),
+        "side_from_cell_coords": lambda obj: obj._make_side_from_cell_coords(),
+        "cell_bvh_id": lambda obj: obj._make_cell_bvh_id(),
+        "cell_bounds": lambda obj: obj._make_cell_bounds(),
+    }
+
+    _dynamic_attribute_constructors_phase_2: ClassVar = {
+        "cell_closest_point": lambda obj: obj._make_cell_closest_point(),
+        "side_closest_point": lambda obj: obj._make_side_closest_point(),
+        "cell_coordinates": lambda obj: obj._make_cell_coordinates(),
+        "side_coordinates": lambda obj: obj._make_side_coordinates(),
+    }
+
+    def __init__(self, field: "wp.fem.GeometryField", relative: bool = True, build_bvh: bool = False):
+        """Construct a Deformed Geometry from a displacement or absolute position field defined over a base geometry.
+        The deformation field does not need to be isoparameteric.
+
+        See also: :meth:`warp.fem.GeometryField.make_deformed_geometry`
+        """
+        from warp._src.fem.field import GeometryField  # noqa: PLC0415 (circular import)
+
+        if field.dtype is not None and (
+            not type_is_vector(field.dtype) or type_size(field.dtype) != field.geometry.dimension
+        ):
+            raise ValueError(
+                "Invalid value type for position field, must be vector-valued with same dimension as underlying geometry"
+            )
+        if field.eval_grad_inner is None:
+            raise ValueError("Gradient evaluation is not supported on the passed field")
+
+        self._relative = relative
+
+        self.field: GeometryField = field
+        self.field_trace = field.trace()
+        self.dimension = self.base.dimension
+
+        self.SideIndexArg = self.base.SideIndexArg
+        self.cell_count = self.base.cell_count
+        self.vertex_count = self.base.vertex_count
+        self.side_count = self.base.side_count
+        self.boundary_side_count = self.base.boundary_side_count
+        self.reference_cell = self.base.reference_cell
+        self.reference_side = self.base.reference_side
+
+        self.side_index_arg_value = self.base.side_index_arg_value
+        self.fill_side_index_arg = self.base.fill_side_index_arg
+        self.boundary_side_index = self.base.boundary_side_index
+
+        cache.setup_dynamic_attributes(self, constructors=self._dynamic_attribute_constructors_phase_1)
+
+        self._make_default_dependent_implementations()
+
+        cache.setup_dynamic_attributes(self, constructors=self._dynamic_attribute_constructors_phase_2)
+
+        if build_bvh:
+            self.build_bvh(self.field.dof_values.device)
+
+    @property
+    def name(self) -> str:
+        """Unique name of the deformed geometry."""
+        name = f"DefGeo_{self.field.name}_{'rel' if self._relative else 'abs'}"
+        if self.environment_count() > 1:
+            name = f"{name}_env"
+        if self.scalar_type != wp.float32:
+            name = f"{name}_f64"
+        return name
+
+    @property
+    def base(self) -> Geometry:
+        """Base geometry prior to deformation."""
+        return self.field.geometry.base
+
+    @property
+    def scalar_type(self):
+        return self.base.scalar_type
+
+    def environment_count(self):
+        return self.base.environment_count()
+
+    @property
+    def cell_env(self):
+        return self.base.cell_env
+
+    # Geometry device interface
+
+    def _make_cell_arg(self):
+        @cache.dynamic_struct(suffix=self.name)
+        class CellArg:
+            base_arg: self.base.CellArg
+            field_arg: self.field.EvalArg
+            cell_bvh: wp.uint64
+
+        return CellArg
+
+    def fill_cell_arg(self, args: "DeformedGeometry.CellArg", device):
+        """Fill arguments for cell-related device functions."""
+        self.base.fill_cell_arg(args.base_arg, device)
+        self.field.fill_eval_arg(args.field_arg, device)
+        args.cell_bvh = self.bvh_id(device)
+
+    def _make_cell_position(self):
+        @cache.dynamic_func(suffix=self.name)
+        def cell_position_absolute(cell_arg: self.CellArg, s: self.sample_type):
+            field_arg = self.field.ElementEvalArg(cell_arg.base_arg, cell_arg.field_arg)
+            return self.field.eval_inner(field_arg, s)
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_position(cell_arg: self.CellArg, s: self.sample_type):
+            field_arg = self.field.ElementEvalArg(cell_arg.base_arg, cell_arg.field_arg)
+            return self.field.eval_inner(field_arg, s) + self.base.cell_position(cell_arg.base_arg, s)
+
+        return cell_position if self._relative else cell_position_absolute
+
+    def _make_cell_deformation_gradient(self):
+        @cache.dynamic_func(suffix=self.name)
+        def cell_deformation_gradient_absolute(cell_arg: self.CellArg, s: self.sample_type):
+            field_arg = self.field.ElementEvalArg(cell_arg.base_arg, cell_arg.field_arg)
+            return self.field.eval_reference_grad_inner(field_arg, s)
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_deformation_gradient(cell_arg: self.CellArg, s: self.sample_type):
+            field_arg = self.field.ElementEvalArg(cell_arg.base_arg, cell_arg.field_arg)
+            return self.field.eval_reference_grad_inner(field_arg, s) + self.base.cell_deformation_gradient(
+                cell_arg.base_arg, s
+            )
+
+        return cell_deformation_gradient if self._relative else cell_deformation_gradient_absolute
+
+    def _make_side_arg(self):
+        @cache.dynamic_struct(suffix=self.name)
+        class SideArg:
+            base_arg: self.base.SideArg
+            trace_arg: self.field_trace.EvalArg
+            field_arg: self.field.EvalArg
+            cell_bvh: wp.uint64
+
+        return SideArg
+
+    def fill_side_arg(self, args: "DeformedGeometry.SideArg", device):
+        """Fill arguments for side-related device functions."""
+        self.base.fill_side_arg(args.base_arg, device)
+        self.field.fill_eval_arg(args.field_arg, device)
+        self.field_trace.fill_eval_arg(args.trace_arg, device)
+        args.cell_bvh = self.bvh_id(device)
+
+    def _make_side_position(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_position_absolute(args: self.SideArg, s: self.sample_type):
+            trace_arg = self.field_trace.ElementEvalArg(args.base_arg, args.trace_arg)
+            return self.field_trace.eval_inner(trace_arg, s)
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_position(args: self.SideArg, s: self.sample_type):
+            trace_arg = self.field_trace.ElementEvalArg(args.base_arg, args.trace_arg)
+            return self.field_trace.eval_inner(trace_arg, s) + self.base.side_position(args.base_arg, s)
+
+        return side_position if self._relative else side_position_absolute
+
+    def _make_side_deformation_gradient(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_deformation_gradient_absolute(args: self.SideArg, s: self.sample_type):
+            base_def_grad = self.base.side_deformation_gradient(args.base_arg, s)
+            trace_arg = self.field_trace.ElementEvalArg(args.base_arg, args.trace_arg)
+
+            Du = self.field_trace.eval_grad_inner(trace_arg, s)
+            return Du * base_def_grad
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_deformation_gradient(args: self.SideArg, s: self.sample_type):
+            base_def_grad = self.base.side_deformation_gradient(args.base_arg, s)
+            trace_arg = self.field_trace.ElementEvalArg(args.base_arg, args.trace_arg)
+
+            Du = self.field_trace.eval_grad_inner(trace_arg, s)
+            return base_def_grad + Du * base_def_grad
+
+        return side_deformation_gradient if self._relative else side_deformation_gradient_absolute
+
+    def _make_side_inner_cell_index(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_inner_cell_index(args: self.SideArg, side_index: ElementIndex):
+            return self.base.side_inner_cell_index(args.base_arg, side_index)
+
+        return side_inner_cell_index
+
+    def _make_side_outer_cell_index(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_outer_cell_index(args: self.SideArg, side_index: ElementIndex):
+            return self.base.side_outer_cell_index(args.base_arg, side_index)
+
+        return side_outer_cell_index
+
+    def _make_cell_environment_index(self):
+        @cache.dynamic_func(suffix=self.name, allow_overloads=True)
+        def cell_environment_index(args: self.CellArg, cell_index: ElementIndex):
+            return self.base.cell_environment_index(args.base_arg, cell_index)
+
+        @cache.dynamic_func(suffix=self.name, allow_overloads=True)
+        def cell_environment_index(args: self.CellArg, s: self.sample_type):
+            return self.base.cell_environment_index(args.base_arg, s)
+
+        return cell_environment_index
+
+    def _make_side_environment_index(self):
+        @cache.dynamic_func(suffix=self.name, allow_overloads=True)
+        def side_environment_index(args: self.SideArg, side_index: ElementIndex):
+            return self.base.side_environment_index(args.base_arg, side_index)
+
+        @cache.dynamic_func(suffix=self.name, allow_overloads=True)
+        def side_environment_index(args: self.SideArg, s: self.sample_type):
+            return self.base.side_environment_index(args.base_arg, s)
+
+        return side_environment_index
+
+    def _make_side_inner_cell_coords(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_inner_cell_coords(args: self.SideArg, side_index: ElementIndex, side_coords: Any):
+            return self.base.side_inner_cell_coords(args.base_arg, side_index, side_coords)
+
+        return side_inner_cell_coords
+
+    def _make_side_outer_cell_coords(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_outer_cell_coords(args: self.SideArg, side_index: ElementIndex, side_coords: Any):
+            return self.base.side_outer_cell_coords(args.base_arg, side_index, side_coords)
+
+        return side_outer_cell_coords
+
+    def _make_side_from_cell_coords(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_from_cell_coords(
+            args: self.SideArg,
+            side_index: ElementIndex,
+            cell_index: ElementIndex,
+            cell_coords: Any,
+        ):
+            return self.base.side_from_cell_coords(args.base_arg, side_index, cell_index, cell_coords)
+
+        return side_from_cell_coords
+
+    def _make_side_to_cell_arg(self):
+        @cache.dynamic_func(suffix=self.name)
+        def side_to_cell_arg(side_arg: self.SideArg):
+            return self.CellArg(self.base.side_to_cell_arg(side_arg.base_arg), side_arg.field_arg, side_arg.cell_bvh)
+
+        return side_to_cell_arg
+
+    def _make_cell_bvh_id(self):
+        @cache.dynamic_func(suffix=self.name)
+        def cell_bvh_id(cell_arg: self.CellArg):
+            return cell_arg.cell_bvh
+
+        return cell_bvh_id
+
+    def _make_cell_bounds(self):
+        raw_points, _weights = self.reference_cell().prototype.instantiate_quadrature(
+            order=self.field.degree, family=Polynomial.LOBATTO_GAUSS_LEGENDRE
+        )
+
+        CoordsType = self.coords_type
+        points = wp.matrix_from_rows(*[CoordsType(*p) for p in raw_points])
+        point_count = len(points)
+
+        vec3_type = cache.cached_vec_type(3, self.scalar_type)
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_bounds(cell_arg: self.CellArg, cell_index: ElementIndex):
+            lower = vec3_type(self.scalar_type(1.0e8))
+            upper = vec3_type(self.scalar_type(-1.0e8))
+            for k in range(point_count):
+                pos = self.cell_position(cell_arg, make_free_sample(cell_index, points[k]))
+                lower = wp.min(lower, pos)
+                upper = wp.max(upper, pos)
+
+            # pad the BBox to account for potential overflows
+            pad = 0.25 * (upper - lower)
+
+            return lower - pad, upper + pad
+
+        return cell_bounds
