@@ -29,10 +29,72 @@ def advance():
     keyboard.tick(bpy.context, 1/60)
 
 
+TREE_ID = nodes.YUGUS_NT_humanoid_motion.bl_idname
+SCENE_FIELDS = (
+    "yugo_avatars", "yugo_avatar_index", "yugo_motion_layers",
+    "yugo_motion_layer_index", "yugo_vrm_armature", "yugo_composing",
+    "yugus_avatars", "yugus_avatar_index", "yugus_composing",
+    "yugu_node_studio_tree",
+)
+
+
+# Integrated Yugo owns the same saved graph IDs as independent Studio.
 yugo.register()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID) is yugo.node.nodes.YUGUS_NT_humanoid_motion
+assert hasattr(bpy.types.Scene, "yugo_avatars")
+assert hasattr(bpy.types.Scene, "yugo_composing")
+assert bpy.app.timers.is_registered(yugo.scheduler._motion_timer)
+assert "keybinds" in yugo.scheduler._motion_callbacks
+parent_timer = yugo.scheduler._motion_timer
+parent_callbacks = dict(yugo.scheduler._motion_callbacks)
+parent_fields = {name: bpy.types.Scene.bl_rna.properties[name].as_pointer()
+                 for name in SCENE_FIELDS if hasattr(bpy.types.Scene, name)}
+try:
+    with RestrictBlend():
+        addon.register()
+except RuntimeError as error:
+    assert "Another Yugo Node" in str(error) and "Disable" in str(error), error
+else:
+    raise AssertionError("Studio must refuse integrated Yugo's Node owner")
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID) is yugo.node.nodes.YUGUS_NT_humanoid_motion
+assert yugo.scheduler._motion_timer is parent_timer
+assert bpy.app.timers.is_registered(parent_timer)
+assert yugo.scheduler._motion_callbacks == parent_callbacks
+assert {name: bpy.types.Scene.bl_rna.properties[name].as_pointer()
+        for name in SCENE_FIELDS if hasattr(bpy.types.Scene, name)} == parent_fields
+assert yugo._registration_complete and not addon._registered
+yugo.unregister()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID, None) is None
+assert all(not hasattr(bpy.types.Scene, name) for name in SCENE_FIELDS)
+assert not bpy.app.timers.is_registered(parent_timer)
+
+# Studio's original feature checks run with Studio as the sole Node owner.
 with RestrictBlend():
     addon.register()
 addon.register()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID) is addon.nodes.YUGUS_NT_humanoid_motion
+assert hasattr(bpy.types.Scene, "yugus_avatars")
+assert not hasattr(bpy.types.Scene, "yugo_avatars")
+studio_timer = addon.scheduler._motion_timer
+studio_callbacks = dict(addon.scheduler._motion_callbacks)
+studio_fields = {name: bpy.types.Scene.bl_rna.properties[name].as_pointer()
+                 for name in SCENE_FIELDS if hasattr(bpy.types.Scene, name)}
+try:
+    with RestrictBlend():
+        yugo.register()
+except RuntimeError as error:
+    assert "Another Yugo Node" in str(error) and "Disable" in str(error), error
+else:
+    raise AssertionError("Integrated Yugo must refuse Studio's Node owner")
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID) is addon.nodes.YUGUS_NT_humanoid_motion
+assert addon._registered and addon.keyboard._enabled
+assert addon.scheduler._motion_timer is studio_timer
+assert bpy.app.timers.is_registered(studio_timer)
+assert addon.scheduler._motion_callbacks == studio_callbacks
+assert {name: bpy.types.Scene.bl_rna.properties[name].as_pointer()
+        for name in SCENE_FIELDS if hasattr(bpy.types.Scene, name)} == studio_fields
+assert not yugo._registered_modules and not yugo._registration_complete
+assert not yugo.node._registered
 tree = bpy.data.node_groups.new("Studio keyboard", "YUGUS_NT_humanoid_motion")
 bpy.context.scene.yugu_node_studio_tree = tree
 a = tree.nodes.new("YUGUS_NODE_key_bind")
@@ -138,8 +200,9 @@ addon._undo_post(None)
 assert not scheduler.is_suspended()
 with RestrictBlend():
     addon.unregister()
-assert hasattr(bpy.types.Scene, "yugo_avatars")
-assert bpy.app.timers.is_registered(yugo.scheduler._motion_timer)
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID, None) is None
+assert all(not hasattr(bpy.types.Scene, name) for name in SCENE_FIELDS)
+assert not bpy.app.timers.is_registered(studio_timer)
 assert not keyboard._windows and not scheduler._motion_callbacks
 with RestrictBlend():
     addon.register()
@@ -159,11 +222,27 @@ assert not bpy.app.timers.is_registered(old_runtime._timer)
 assert sum(handler is addon._load_pre for handler in bpy.app.handlers.load_pre) == 1
 with RestrictBlend():
     addon.unregister()
-assert hasattr(bpy.types.Scene, "yugo_avatars")
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID, None) is None
+assert all(not hasattr(bpy.types.Scene, name) for name in SCENE_FIELDS)
 addon.register()
 addon.unregister()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID, None) is None
+assert all(not hasattr(bpy.types.Scene, name) for name in SCENE_FIELDS)
+# Disabling Studio releases the shared graph IDs so integrated Yugo can return.
+with RestrictBlend():
+    yugo.register()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID) is yugo.node.nodes.YUGUS_NT_humanoid_motion
+assert yugo._registration_complete and yugo.node._registered
 assert hasattr(bpy.types.Scene, "yugo_avatars")
+assert hasattr(bpy.types.Scene, "yugo_motion_layers")
+assert hasattr(bpy.types.Scene, "yugo_vrm_armature")
+assert hasattr(bpy.types.Scene, "yugo_composing")
+assert hasattr(bpy.types.Scene, "yugu_node_studio_tree")
+assert not hasattr(bpy.types.Scene, "yugus_avatars")
+assert not hasattr(bpy.types.Scene, "yugus_composing")
 assert bpy.app.timers.is_registered(yugo.scheduler._motion_timer)
 assert "keybinds" in yugo.scheduler._motion_callbacks
 yugo.unregister()
+assert bpy.types.NodeTree.bl_rna_get_subclass_py(TREE_ID, None) is None
+assert all(not hasattr(bpy.types.Scene, name) for name in SCENE_FIELDS)
 print("YUGU_STUDIO_KEYBOARD_LIFECYCLE_OK")
