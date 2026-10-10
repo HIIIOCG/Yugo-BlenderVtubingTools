@@ -70,6 +70,14 @@ only after the host allocation fails; the Windows runner resolves the executable
 with Python's platform-aware search. All platforms must pass again after these
 corrections before publication.
 
+After the allocator correction, 26/26 dependency unit checks passed. Windows
+x64 installation/restart/editor/CPU gravity and the same twelve source/package
+fusion executions passed again on Blender 5.1.2/5.2.0. The corrected local ZIP
+SHA-256 is `2947f45371250a512d237b6b1aa95fc3d0919a951f2711c07a5287b5ec393722`;
+evidence is in `artifacts/allocator-package/`,
+`artifacts/allocator-platform-{51,52}/` and
+`artifacts/allocator-fusion-{51,52}/results.json`.
+
 Qualification is pending until the native CI results are recorded in task #44
 and its PR. Windows execution or static wheel metadata alone does not establish
 Mac/Linux runtime success. Run artifacts retain commands, exit codes, engine
