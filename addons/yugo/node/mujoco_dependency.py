@@ -154,42 +154,96 @@ def _import_mujoco():
     return importlib.import_module('mujoco')
 
 
+def _allocator_probe(engine):
+    """Dispose the probe with the current allocator before installing any hooks."""
+    model = data = None
+    try:
+        if sys.platform == 'linux':
+            model = engine.MjModel.from_xml_string(
+                '<mujoco><worldbody><body><freejoint/>'
+                '<geom type="sphere" size="0.1" density="1000"/>'
+                '</body></worldbody></mujoco>')
+            data = engine.MjData(model)
+        else:
+            model = engine.MjModel.from_xml_string('<mujoco/>')
+    finally:
+        # Exceptions retain traceback locals; release these before swapping the
+        # global free hook, including when a model succeeds but its data fails.
+        data = None
+        model = None
+
+
+def _linux_native_allocator_active(engine):
+    """Python getters cannot see hooks installed directly by native consumers."""
+    import ctypes
+    path = Path(engine.__file__).resolve().parent / f'libmujoco.so.{engine.__version__}'
+    try:
+        native = ctypes.CDLL(str(path))
+        return any(ctypes.c_void_p.in_dll(native, name).value
+                   for name in ('mju_user_malloc', 'mju_user_free'))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'Cannot inspect the loaded MuJoCo allocator: {error}') from error
+
+
 def _host_allocator(engine):
-    """Use MuJoCo's official paired hooks for Blender's Windows CRT host.
+    """Use MuJoCo's official paired hooks when Blender's allocation fails.
 
     Blender's host allocator can intercept the wheel's aligned allocation.
-    Explicit UCRT allocation preserves MuJoCo's required 64-byte alignment.
+    Explicit UCRT/glibc allocation preserves MuJoCo's 64-byte alignment.
     Keep callbacks pinned on the engine module for native model lifetimes,
     including extension reloads. Existing application hooks remain authoritative.
     """
-    if sys.platform != "win32" or "bpy" not in sys.modules:
+    if sys.platform not in {'win32', 'linux'} or "bpy" not in sys.modules:
         return
     if (engine.get_mju_user_malloc() is not None
             or engine.get_mju_user_free() is not None):
         return
+    if sys.platform == 'linux' and _linux_native_allocator_active(engine):
+        return
     try:
-        probe = engine.MjModel.from_xml_string("<mujoco/>")
+        _allocator_probe(engine)
     except Exception as error:
         if "Could not allocate memory" not in str(error):
             raise RuntimeError(f"Cannot initialize MuJoCo in Blender: {error}") from error
     else:
-        del probe
         return
     import ctypes
-    crt = ctypes.CDLL("ucrtbase.dll")
-    allocate = crt._aligned_malloc
-    allocate.argtypes = (ctypes.c_size_t, ctypes.c_size_t)
-    allocate.restype = ctypes.c_void_p
-    release = crt._aligned_free
+    if sys.platform == 'win32':
+        crt = ctypes.CDLL("ucrtbase.dll")
+        allocate = crt._aligned_malloc
+        allocate.argtypes = (ctypes.c_size_t, ctypes.c_size_t)
+        allocate.restype = ctypes.c_void_p
+        aligned_allocate = lambda size: allocate(max(int(size), 64), 64)
+        release = crt._aligned_free
+    else:
+        # Supported Linux wheels require glibc. Resolve its own allocator pair,
+        # not symbols in the Blender process (CDLL(None)) which may interpose it.
+        crt = ctypes.CDLL('libc.so.6')
+        allocate = crt.posix_memalign
+        allocate.argtypes = (ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t)
+        allocate.restype = ctypes.c_int
+        release = crt.free
+
+        def aligned_allocate(size):
+            pointer = ctypes.c_void_p()
+            result = allocate(ctypes.byref(pointer), 64, max(int(size), 64))
+            return pointer.value if result == 0 else None
+
     release.argtypes = (ctypes.c_void_p,)
     release.restype = None
     malloc_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
     free_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
-    malloc_hook = malloc_type(lambda size: allocate(max(int(size), 64), 64))
+    malloc_hook = malloc_type(aligned_allocate)
     free_hook = free_type(lambda pointer: release(pointer))
     engine._yugo_allocator_refs = (crt, allocate, release, malloc_hook, free_hook)
     engine.set_mju_user_malloc(malloc_hook)
     engine.set_mju_user_free(free_hook)
+    try:
+        _allocator_probe(engine)
+    except Exception as error:
+        # 3.3.7's setters(None) leave the C pointer intact. Never unpin/clear a
+        # published callback, even when the post-install probe fails.
+        raise RuntimeError(f'Cannot initialize MuJoCo with the native allocator: {error}') from error
 
 
 def load_mujoco():
@@ -239,7 +293,7 @@ def _check_version(engine):
         missing.append('MjModel.from_xml_string')
     if getattr(getattr(engine, 'mjtObj', None), 'mjOBJ_BODY', None) is None:
         missing.append('mjtObj.mjOBJ_BODY')
-    if sys.platform == 'win32' and 'bpy' in sys.modules:
+    if sys.platform in {'win32', 'linux'} and 'bpy' in sys.modules:
         missing.extend(name for name in ('get_mju_user_malloc', 'get_mju_user_free',
                                          'set_mju_user_malloc', 'set_mju_user_free')
                        if not callable(getattr(engine, name, None)))

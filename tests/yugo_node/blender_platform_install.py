@@ -76,6 +76,7 @@ record = {'status': 'passed', 'platform': actual_platform, 'machine': platform.m
           'module_file': str(addon.__file__), 'entries': entries,
           'package_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
           'mujoco_version': engine.__version__, 'mujoco_file': engine.__file__,
+          'host_allocator_override': bool(getattr(engine, '_yugo_allocator_refs', None)),
           'simulation_time': float(data.time), 'simulation_height': float(data.qpos[2]),
           'mujoco_gl_override': os.environ.get('MUJOCO_GL'),
           'editor_ui_type': area.ui_type,

@@ -49,7 +49,7 @@ before creating a new release. Existing tags and release assets are immutable.
 
 ## Evidence and limits
 
-The frozen local candidate passed 19 dependency unit checks and real installed
+The initial local candidate passed 19 dependency unit checks and real installed
 extension checks on Windows x64 with Blender 5.1.2 and 5.2.0. Each version also
 passed lifecycle, onboarding and live physics in both source and package modes
 (12 fusion executions). The same local ZIP was used for both versions:
@@ -59,6 +59,16 @@ Task-owned evidence is in `artifacts/wheels/unit-checks.json`,
 `artifacts/final-fusion-51/results.json` and
 `artifacts/final-fusion-52/results.json`. The commands are the validation route
 above, with the task's absolute Blender binary paths and `windows-x64`.
+
+The first native workflow at PR head
+`6c71abd0d4d6d6befa5be00bde35e1cd92f3b9aa` passed both Apple Silicon macOS
+targets, including the ordinary MuJoCo import and all six source/package fusion
+checks per Blender version. [Run 38035618021](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/actions/runs/38035618021)
+also exposed a real Linux model-allocation failure and a Windows CI executable
+path issue. The Linux loader now uses the official paired allocation hooks
+only after the host allocation fails; the Windows runner resolves the executable
+with Python's platform-aware search. All platforms must pass again after these
+corrections before publication.
 
 Qualification is pending until the native CI results are recorded in task #44
 and its PR. Windows execution or static wheel metadata alone does not establish

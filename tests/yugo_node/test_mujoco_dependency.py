@@ -1,6 +1,8 @@
 """Dependency selection and embedded-host import checks without importing bpy."""
 from __future__ import annotations
 
+import ctypes
+import gc
 import hashlib
 import importlib.util
 import os
@@ -285,6 +287,140 @@ class EngineTests(unittest.TestCase):
         supplied.mj_step = None
         with self.assertRaisesRegex(RuntimeError, 'missing required CPU APIs: mj_step'):
             dependency._check_version(supplied)
+
+
+class AllocatorTests(unittest.TestCase):
+    def supplied(self, failures=()):
+        supplied = engine()
+        supplied.__file__ = str(SOURCE.parent / 'fixture-mujoco/__init__.py')
+        hooks = {'malloc': None, 'free': None}
+        supplied.get_mju_user_malloc = mock.Mock(side_effect=lambda: hooks['malloc'])
+        supplied.get_mju_user_free = mock.Mock(side_effect=lambda: hooks['free'])
+        supplied.set_mju_user_malloc = mock.Mock(side_effect=lambda hook: hooks.update(malloc=hook))
+        supplied.set_mju_user_free = mock.Mock(side_effect=lambda hook: hooks.update(free=hook))
+        supplied.MjModel.from_xml_string = mock.Mock(side_effect=[*failures, object()])
+        supplied.MjData = mock.Mock(return_value=object())
+        return supplied, hooks
+
+    def library(self, status=0):
+        library = SimpleNamespace(_aligned_malloc=mock.Mock(return_value=0x1000),
+                                  _aligned_free=mock.Mock(), free=mock.Mock())
+
+        def posix_allocate(pointer, _alignment, _size):
+            ctypes.cast(pointer, ctypes.POINTER(ctypes.c_void_p))[0] = 0x1000
+            return status
+
+        library.posix_memalign = mock.Mock(side_effect=posix_allocate)
+        return library
+
+    def test_existing_python_hooks_are_preserved_on_windows_and_linux(self):
+        for system in ('win32', 'linux'):
+            for owner in ('malloc', 'free'):
+                with self.subTest(system=system, owner=owner):
+                    supplied, hooks = self.supplied()
+                    hooks[owner] = object()
+                    with mock.patch.object(sys, 'platform', system), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(ctypes, 'CDLL') as library:
+                        dependency._host_allocator(supplied)
+                    library.assert_not_called()
+                    supplied.MjModel.from_xml_string.assert_not_called()
+                    supplied.set_mju_user_malloc.assert_not_called()
+                    supplied.set_mju_user_free.assert_not_called()
+
+    def test_mac_and_non_blender_hosts_keep_default_allocator(self):
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(ctypes, 'CDLL') as library:
+            dependency._host_allocator(engine())
+            library.assert_not_called()
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop('bpy', None)
+            for system in ('win32', 'linux'):
+                with mock.patch.object(sys, 'platform', system), mock.patch.object(ctypes, 'CDLL') as library:
+                    dependency._host_allocator(engine())
+                    library.assert_not_called()
+
+    def test_successful_default_probe_and_unrelated_failure_do_not_install_hooks(self):
+        for system in ('win32', 'linux'):
+            for failure in (None, ValueError('invalid model')):
+                with self.subTest(system=system, failure=failure):
+                    supplied, _hooks = self.supplied(() if failure is None else (failure,))
+                    with mock.patch.object(sys, 'platform', system), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(dependency, '_linux_native_allocator_active', return_value=False), mock.patch.object(ctypes, 'CDLL') as library:
+                        if failure is None:
+                            dependency._host_allocator(supplied)
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, 'Cannot initialize.*invalid model'):
+                                dependency._host_allocator(supplied)
+                    library.assert_not_called()
+                    supplied.set_mju_user_malloc.assert_not_called()
+                    supplied.set_mju_user_free.assert_not_called()
+                    if system == 'linux' and failure is None:
+                        self.assertIn('<freejoint/>', supplied.MjModel.from_xml_string.call_args.args[0])
+                        supplied.MjData.assert_called_once()
+
+    def test_failed_host_probe_installs_one_pinned_native_pair_and_verifies_it(self):
+        for system, filename in [('win32', 'ucrtbase.dll'), ('linux', 'libc.so.6')]:
+            with self.subTest(system=system):
+                supplied, hooks = self.supplied((ValueError('engine error: Could not allocate memory'),))
+                library = self.library()
+                with mock.patch.object(sys, 'platform', system), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(dependency, '_linux_native_allocator_active', return_value=False), mock.patch.object(ctypes, 'CDLL', return_value=library) as loader:
+                    dependency._host_allocator(supplied)
+                    loader.assert_called_once_with(filename)
+                    for size in (0, 1, 65, 1024):
+                        self.assertEqual(hooks['malloc'](size), 0x1000)
+                    hooks['free'](0x1000)
+                    self.assertIn(library, supplied._yugo_allocator_refs)
+                    self.assertIn(hooks['malloc'], supplied._yugo_allocator_refs)
+                    self.assertIn(hooks['free'], supplied._yugo_allocator_refs)
+                    gc.collect()
+                    dependency._host_allocator(supplied)
+                self.assertEqual(supplied.MjModel.from_xml_string.call_count, 2)
+                supplied.set_mju_user_malloc.assert_called_once_with(hooks['malloc'])
+                supplied.set_mju_user_free.assert_called_once_with(hooks['free'])
+                self.assertTrue(all(call.args[0] is not None for call in supplied.set_mju_user_malloc.call_args_list))
+                if system == 'linux':
+                    self.assertEqual(library.posix_memalign.argtypes,
+                                     (ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t))
+                    self.assertIs(library.posix_memalign.restype, ctypes.c_int)
+                    self.assertEqual([call.args[1:] for call in library.posix_memalign.call_args_list],
+                                     [(64, 64), (64, 64), (64, 65), (64, 1024)])
+                    library.free.assert_called_once_with(0x1000)
+                    self.assertEqual(library.free.argtypes, (ctypes.c_void_p,))
+                    self.assertIsNone(library.free.restype)
+                else:
+                    self.assertEqual([call.args for call in library._aligned_malloc.call_args_list],
+                                     [(64, 64), (64, 64), (65, 64), (1024, 64)])
+                    library._aligned_free.assert_called_once_with(0x1000)
+
+    def test_posix_failure_returns_null_and_failed_verification_keeps_callbacks_alive(self):
+        supplied, hooks = self.supplied((ValueError('Could not allocate memory'), ValueError('still failing')))
+        library = self.library(status=12)
+        with mock.patch.object(sys, 'platform', 'linux'), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(dependency, '_linux_native_allocator_active', return_value=False), mock.patch.object(ctypes, 'CDLL', return_value=library):
+            with self.assertRaisesRegex(RuntimeError, 'native allocator: still failing'):
+                dependency._host_allocator(supplied)
+        self.assertIsNone(hooks['malloc'](65))
+        self.assertIn(hooks['malloc'], supplied._yugo_allocator_refs)
+        self.assertIn(hooks['free'], supplied._yugo_allocator_refs)
+        supplied.set_mju_user_malloc.assert_called_once_with(hooks['malloc'])
+        supplied.set_mju_user_free.assert_called_once_with(hooks['free'])
+
+    def test_direct_native_linux_hooks_are_preserved_even_when_python_getters_are_empty(self):
+        for malloc, free in [(0x1000, None), (None, 0x2000), (None, None)]:
+            with self.subTest(malloc=malloc, free=free):
+                supplied, _hooks = self.supplied()
+                library = object()
+                values = {'mju_user_malloc': malloc, 'mju_user_free': free}
+                with mock.patch.object(sys, 'platform', 'linux'), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(ctypes, 'CDLL', return_value=library) as loader, mock.patch.object(ctypes.c_void_p, 'in_dll', side_effect=lambda _library, name: SimpleNamespace(value=values[name])):
+                    dependency._host_allocator(supplied)
+                self.assertEqual(Path(loader.call_args.args[0]).name, 'libmujoco.so.3.3.7')
+                self.assertEqual(supplied.MjModel.from_xml_string.call_count, int(malloc is None and free is None))
+                supplied.set_mju_user_malloc.assert_not_called()
+                supplied.set_mju_user_free.assert_not_called()
+
+    def test_native_hook_inspection_failure_does_not_replace_unknown_consumer(self):
+        supplied, _hooks = self.supplied()
+        with mock.patch.object(sys, 'platform', 'linux'), mock.patch.dict(sys.modules, {'bpy': object()}), mock.patch.object(ctypes, 'CDLL', side_effect=OSError('missing native module')):
+            with self.assertRaisesRegex(RuntimeError, 'Cannot inspect.*missing native module'):
+                dependency._host_allocator(supplied)
+        supplied.set_mju_user_malloc.assert_not_called()
+        supplied.set_mju_user_free.assert_not_called()
 
 
 class DistributionTests(unittest.TestCase):

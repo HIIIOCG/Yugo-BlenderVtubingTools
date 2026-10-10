@@ -63,11 +63,13 @@ jobs:
         shell: bash
         run: |
           unset MUJOCO_GL PYGLFW_LIBRARY
+          blender=$(python -c 'import shutil; print(shutil.which("blender") or "")')
+          test -n "$blender"
           version=$(python -B scripts/check_version.py --print-version)
           package="dist/yugo-$version.zip"
           python -B -m unittest discover -s tests/yugo_node -p test_mujoco_dependency.py
-          python -B scripts/yugo_platform_check.py --blender "$(command -v blender)" --package "$package" --platform "${{ matrix.platform }}" --output artifacts/platform
-          python -B scripts/run_fusion_checks.py --blender "$(command -v blender)" --package "$package" --test lifecycle --test onboarding --test physics_live --output artifacts/fusion
+          python -B scripts/yugo_platform_check.py --blender "$blender" --package "$package" --platform "${{ matrix.platform }}" --output artifacts/platform
+          python -B scripts/run_fusion_checks.py --blender "$blender" --package "$package" --test lifecycle --test onboarding --test physics_live --output artifacts/fusion
       - uses: actions/upload-artifact@v4
         if: always()
         with:
