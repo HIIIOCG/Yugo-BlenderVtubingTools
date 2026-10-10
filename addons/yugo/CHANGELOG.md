@@ -3,6 +3,36 @@
 All notable changes to Yugo are documented here. Version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-10
+
+### Added
+
+- The complete current DEV Yugo Node 0.10.0 runtime in the Yugo extension:
+  motion and expression sources, graph processing, values and math, workflow
+  controls, VRM Spring physics, and MuJoCo object physics
+- One **Yugo** sidebar tab for the original controls and Node Editor controls,
+  with a graph launcher in the 3D View
+- Bundled Windows x64 physics dependencies and their original license notices
+
+### Improved
+
+- Node Composer, MToon Optimize and Outline share the original Yugo avatar
+  list, Scene settings and `preset.blend`; the legacy Comp and preset are retained
+- Existing DEV visual ownership tags remain readable without duplicating
+  shaders, Shadow Mix, compositor generations or Viewer nodes
+- Registration failure rolls back installed resources; repeated enable,
+  disable and reload preserve ownership and clean up handlers and timers
+- Existing Node graph, socket, node and operator identifiers are preserved;
+  DEV's retired nodes remain inactive compatibility declarations
+
+### Installation
+
+- Windows x64; validated with Blender 5.1.2 and 5.2.0 LTS
+- Install `yugo-0.2.0.zip` through **Preferences > Get Extensions > Install from Disk**
+- Disable separately installed Yugo Node or Yugu Node Studio before enabling
+  this package, because they share Node identifiers
+- The published ZIP has a SHA-256 file and a source/build provenance report
+
 ## [0.1.26] - 2026-09-05
 
 ### Added
@@ -38,5 +68,6 @@ All notable changes to Yugo are documented here. Version numbers follow
   interpolated 60 Hz display output
 - Network access now follows Blender's Allow Online Access preference
 
+[0.2.0]: https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.0
 [0.1.26]: ../../releases/tag/v0.1.26
 [0.1.14]: ../../releases/tag/v0.1.14

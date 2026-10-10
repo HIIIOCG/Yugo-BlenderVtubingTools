@@ -1,8 +1,8 @@
-# Yugo 0.1.26
+# Yugo 0.2.0
 
 ## Integrated Yugo Node
 
-This source candidate includes the complete current Yugo Node 0.10.0 runtime
+This release includes the complete current Yugo Node 0.10.0 runtime
 from the DEV repository under `node/`. Install one Yugo package and use the
 **Yugo** sidebar tab in both the 3D View and Node Editor. The **Yugo Node** panel
 lets you create/select a graph and open its editor. The original Motion Layers,
@@ -19,7 +19,8 @@ See [Node functionality](node/README.md) and the
 The bundled MuJoCo runtime requires Windows x64 and Blender 5.1/5.2. Disable
 any separately installed Yugo Node or Yugu Node Studio before enabling this
 integrated package; the packages share graph identifiers and cannot both own
-them. This is a local integration candidate, not a new published release.
+them. Download the integrated package from the
+[Yugo 0.2.0 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.0).
 
 ## Legacy functionality
 
@@ -185,8 +186,8 @@ Extension should be disabled or uninstalled after upgrading.
 
 ## Install
 
-1. Download `yugo-0.1.26.zip` from the GitHub release.
-2. In Blender 5.1, open **Edit > Preferences > Extensions**.
+1. Download `yugo-0.2.0.zip` from the GitHub release.
+2. In Blender 5.1 or 5.2 on Windows x64, open **Edit > Preferences > Extensions**.
 3. Open the menu in the upper-right corner and choose **Install from Disk**.
 4. Select the downloaded ZIP and enable Yugo if needed.
 5. Open the 3D Viewport sidebar and select the **Yugo** tab.

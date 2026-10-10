@@ -25,12 +25,13 @@ Yugo is designed to grow beyond avatar control into a toolkit for live performan
 
 ## Get started
 
-Yugo Node requires **Blender 5.1 or newer**.
+Yugo 0.2.0 includes Yugo Node and the original Yugo tools in one extension.
+This release supports **Windows x64** and has been verified with **Blender 5.1 and 5.2**.
 
-Install a Yugo Node ZIP in **Preferences → Get Extensions → Install from Disk**, enable the add-on, and restart Blender.
+Download [yugo-0.2.0.zip](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.0), install it in **Preferences → Get Extensions → Install from Disk**, enable Yugo, and restart Blender. The 3D View and Node Editor controls share the **Yugo** sidebar tab. Disable a separately installed Yugo Node or Yugu Node Studio before enabling this package.
 
 - [User documentation](https://github.com/HIIIOCG/Yugo-Docs)
-- [Report an issue](https://github.com/HIIIOCG/Yugo-BlenderVtubing-Dev/issues)
+- [Report an issue](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)
 
 ## License and acknowledgments
 

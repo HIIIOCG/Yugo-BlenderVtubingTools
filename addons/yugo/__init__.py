@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Yugo",
     "author": "Yugo Contributors",
-    "version": (0, 1, 26),
+    "version": (0, 2, 0),
     "blender": (5, 1, 0),
     "location": "View3D / Node Editor > Sidebar > Yugo",
     "description": "Avatar motion layers, nodes, physics, camera and compositing",
