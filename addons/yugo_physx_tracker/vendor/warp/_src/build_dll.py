@@ -1,0 +1,1015 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import concurrent.futures
+import functools
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+from warp._src.build_architecture import Architecture, machine_architecture
+from warp._src.utils import ScopedTimer
+
+verbose_cmd = True  # print command lines before executing them
+
+MIN_CTK_VERSION = (12, 0)
+
+# Echoed by our wrapper command before dumping the environment; the MSVC
+# environment script does not emit it.
+_VCVARS_ENV_DUMP_MARKER = "__WARP_VCVARS_ENV_BEGIN__"
+
+
+def _parse_vcvars_environment(output: str) -> dict[str, str]:
+    """Parse environment variables from selected MSVC script ``&& set`` output.
+
+    Scans the command output for ``_VCVARS_ENV_DUMP_MARKER`` and only begins parsing
+    after it, so any banner text emitted by the selected MSVC script is ignored. Each
+    subsequent line is split on the first ``=`` into a ``KEY=VALUE`` pair; lines
+    without a separator or with an empty key are skipped.
+
+    Args:
+        output: Decoded output of selected MSVC script ``&& echo MARKER && set``.
+
+    Returns:
+        Mapping of environment variable names to values found after the marker.
+        Empty if the marker is absent or no valid entries follow it.
+    """
+    env = {}
+    parse_env = False
+
+    for line in output.splitlines():
+        if not parse_env:
+            parse_env = line.strip() == _VCVARS_ENV_DUMP_MARKER
+            continue
+
+        key, sep, value = line.partition("=")
+        if not sep or not key:
+            continue
+
+        env[key] = value
+
+    return env
+
+
+def _msvc_toolchain_layout(arch: Architecture) -> tuple[str, str]:
+    if arch == "aarch64":
+        return "HostARM64", "arm64"
+    return "HostX64", "x64"
+
+
+def _msvc_environment_script(vs_path: str, arch: Architecture) -> tuple[str, list[str]]:
+    if arch == "aarch64":
+        return (
+            os.path.join(vs_path, "Common7", "Tools", "VsDevCmd.bat"),
+            ["-arch=arm64", "-host_arch=arm64"],
+        )
+    return os.path.join(vs_path, "VC", "Auxiliary", "Build", "vcvars64.bat"), []
+
+
+def packman_llvm_platform(arch: str) -> str:
+    """Map a Warp architecture string to the Packman platform token for the prebuilt Clang/LLVM SDK.
+
+    These tokens are the ones used in ``deps/llvm-deps.packman.xml``. They follow
+    ``packman.utils.get_platform()`` rather than the spelling inside the release asset names, so that a
+    manual ``packman pull`` with no ``--platform`` resolves on a native host.
+
+    ``build_llvm.py`` star-imports this module, so this is the single definition for both the library
+    and the build scripts. Keep it in sync with ``warp_get_llvm_packman_platform()`` in
+    ``tools/cmake/WarpDependencies.cmake``, which must express the same mapping in CMake.
+    """
+    if os.name == "nt":
+        return f"windows-{arch}"
+    if sys.platform == "darwin":
+        return f"macos-{arch}"
+    return f"linux-{arch}"
+
+
+def run_cmd(cmd, print_success_output=True):
+    if verbose_cmd:
+        print(cmd)
+
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True)
+        # Print output even on success to show warnings
+        if print_success_output and output:
+            decoded_output = output.decode()
+            if decoded_output.strip():  # Only print if not just whitespace
+                # In parallel builds, associate output with its command for clarity
+                # Use single print to avoid interleaving with other processes
+                print(f"Output from: {cmd}\n{decoded_output}")
+        return output
+    except subprocess.CalledProcessError as e:
+        # Single print to avoid interleaving in parallel builds
+        print(f"Command failed with exit code {e.returncode}: {cmd}\nCommand output was:\n{e.output.decode()}")
+        raise e
+
+
+# Cut-down version of the MSVC environment script that allows using
+# custom toolchain locations, returns the compiler program path
+def set_msvc_env(msvc_path, sdk_path, host_arch: Architecture | None = None) -> str:
+    host_arch = host_arch or machine_architecture()
+    host_directory, target_directory = _msvc_toolchain_layout(host_arch)
+
+    if "INCLUDE" not in os.environ:
+        os.environ["INCLUDE"] = ""
+
+    if "LIB" not in os.environ:
+        os.environ["LIB"] = ""
+
+    msvc_path = os.path.abspath(msvc_path)
+    sdk_path = os.path.abspath(sdk_path)
+
+    os.environ["INCLUDE"] += os.pathsep + os.path.join(msvc_path, "include")
+    os.environ["INCLUDE"] += os.pathsep + os.path.join(sdk_path, "include/winrt")
+    os.environ["INCLUDE"] += os.pathsep + os.path.join(sdk_path, "include/um")
+    os.environ["INCLUDE"] += os.pathsep + os.path.join(sdk_path, "include/ucrt")
+    os.environ["INCLUDE"] += os.pathsep + os.path.join(sdk_path, "include/shared")
+
+    os.environ["LIB"] += os.pathsep + os.path.join(msvc_path, "lib", target_directory)
+    os.environ["LIB"] += os.pathsep + os.path.join(sdk_path, "lib", "ucrt", target_directory)
+    os.environ["LIB"] += os.pathsep + os.path.join(sdk_path, "lib", "um", target_directory)
+
+    os.environ["PATH"] += os.pathsep + os.path.join(msvc_path, "bin", host_directory, target_directory)
+    os.environ["PATH"] += os.pathsep + os.path.join(sdk_path, "bin", target_directory)
+
+    return os.path.join(msvc_path, "bin", host_directory, target_directory, "cl.exe")
+
+
+def find_host_compiler(host_arch: Architecture | None = None) -> str:
+    """Find the host C++ compiler.
+
+    On Windows, checks for pre-configured Visual Studio environment before
+    attempting auto-configuration. On Unix/Linux, respects $CXX environment
+    variable if set.
+
+    Returns:
+        Path to compiler executable, or empty string if not found (Windows only).
+        Note: Empty string return allows build_lib.py to handle error gracefully.
+    """
+    host_arch = host_arch or machine_architecture()
+
+    if os.name == "nt":
+        # Check if Visual Studio environment already configured (conda, Docker, etc.)
+        # VCINSTALLDIR and VCToolsVersion are set by the MSVC environment script.
+        if os.environ.get("VCINSTALLDIR") or os.environ.get("VCToolsVersion"):
+            arm_environment_matches = (
+                os.environ.get("VSCMD_ARG_HOST_ARCH") == "arm64" and os.environ.get("VSCMD_ARG_TGT_ARCH") == "arm64"
+            )
+            if host_arch != "aarch64" or arm_environment_matches:
+                if verbose_cmd:
+                    print("Visual Studio environment already configured, skipping MSVC environment script")
+
+                cl_path = shutil.which("cl.exe")
+                if cl_path:
+                    if verbose_cmd:
+                        print(f"Using cl.exe from pre-configured environment: {cl_path}")
+                    return cl_path
+                # Fall through to auto-configuration if cl.exe is not actually available.
+                if verbose_cmd:
+                    print("Warning: VS environment variables set but cl.exe not found, attempting auto-configuration")
+            else:
+                if verbose_cmd:
+                    print("Warning: VS environment is not configured for native ARM64, attempting auto-configuration")
+
+        vswhere_path = r"%ProgramFiles(x86)%/Microsoft Visual Studio/Installer/vswhere.exe"
+        vswhere_path = os.path.expandvars(vswhere_path)
+        if not os.path.isfile(vswhere_path):
+            return ""  # Signal to caller that VS not found
+
+        component = (
+            "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            if host_arch == "aarch64"
+            else "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+        )
+        vs_path = (
+            run_cmd(f'"{vswhere_path}" -latest -requires {component} -property installationPath').decode().rstrip()
+        )
+        vsvars_path, vsvars_arguments = _msvc_environment_script(vs_path, host_arch)
+
+        if not os.path.isfile(vsvars_path):
+            return ""  # Signal to caller that VS environment script not found
+
+        vsvars_command = " ".join([f'"{vsvars_path}"', *vsvars_arguments])
+        output = run_cmd(
+            f"{vsvars_command} && echo {_VCVARS_ENV_DUMP_MARKER} && set", print_success_output=False
+        ).decode()
+
+        os.environ.update(_parse_vcvars_environment(output))
+
+        cl_path = shutil.which("cl.exe")
+        if not cl_path:
+            return ""  # Signal to caller that cl.exe was not found after vcvars configuration
+
+        vc_tools_version = os.environ.get("VCToolsVersion")
+        if not vc_tools_version:
+            return ""  # Signal to caller that VS environment script did not configure MSVC
+
+        if host_arch == "aarch64" and (
+            os.environ.get("VSCMD_ARG_HOST_ARCH") != "arm64" or os.environ.get("VSCMD_ARG_TGT_ARCH") != "arm64"
+        ):
+            return ""  # Signal to caller that the MSVC environment script selected the wrong architecture
+
+        cl_version = vc_tools_version.split(".")
+
+        # ensure at least VS2019 version, see list of MSVC versions here https://en.wikipedia.org/wiki/Microsoft_Visual_C%2B%2B
+        cl_required_major = 14
+        cl_required_minor = 29
+
+        if int(cl_version[0]) < cl_required_major or (
+            (int(cl_version[0]) == cl_required_major) and (int(cl_version[1]) < cl_required_minor)
+        ):
+            print(
+                f"Warp: MSVC found but compiler version too old, found {cl_version[0]}.{cl_version[1]}, but must be {cl_required_major}.{cl_required_minor} or higher, kernel host compilation will be disabled."
+            )
+            return ""  # Signal to caller that version too old
+
+        return cl_path
+
+    else:
+        # Respect $CXX environment variable (conda, cross-compilation, custom compilers, etc.)
+        cxx = os.environ.get("CXX", "").strip()
+        if cxx:
+            if verbose_cmd:
+                print(f"Using C++ compiler from $CXX: {cxx}")
+            return cxx
+
+        gxx_path = shutil.which("g++")
+        if gxx_path:
+            if verbose_cmd:
+                print(f"Using g++ found in PATH: {gxx_path}")
+            return gxx_path
+        else:
+            if verbose_cmd:
+                print("Warning: Could not locate g++, falling back to 'g++'")
+            return "g++"
+
+
+def get_cuda_toolkit_version(cuda_home) -> tuple[int, int]:
+    try:
+        # Get nvcc command using intelligent discovery
+        nvcc_cmd = find_nvcc_executable(cuda_home)
+
+        # Remove quotes for subprocess call (subprocess handles paths directly)
+        nvcc_executable = nvcc_cmd.strip('"')
+        if not nvcc_executable:
+            raise ValueError("nvcc command is empty")
+
+        nvcc_version_output = subprocess.check_output([nvcc_executable, "--version"]).decode("utf-8")
+
+        # search for release substring (e.g., "release 11.5")
+        m = re.search(r"release (\d+)\.(\d+)", nvcc_version_output)
+        if m is not None:
+            major, minor = map(int, m.groups())
+            return (major, minor)
+        else:
+            raise Exception("Failed to parse NVCC output")
+
+    except Exception as e:
+        print(f"Warning: Failed to determine CUDA Toolkit version: {e}")
+        return MIN_CTK_VERSION
+
+
+@functools.lru_cache(maxsize=1)  # Avoid duplicate verbose output when called multiple times per build
+def find_nvcc_executable(cuda_home) -> str:
+    """Find nvcc executable, maintaining consistency with cuda_home.
+
+    Detection order prioritizes consistency between compiler and headers/libs:
+    1. If cuda_home is set → use its nvcc (ensures consistency with headers/libs)
+    2. Otherwise check PATH → use nvcc from PATH (conda, modules, containers)
+    3. Fall back to assuming nvcc in PATH
+
+    This ensures the nvcc compiler version matches the CUDA headers/libraries,
+    preventing compilation failures from version mismatches.
+
+    Args:
+        cuda_home: Path to CUDA installation (may be None). Can come from
+            CUDA_HOME env var, --cuda-path argument, or auto-detection.
+
+    Returns:
+        String command to invoke nvcc (either "nvcc" or quoted full path)
+    """
+    # Determine correct executable name for platform
+    nvcc_name = "nvcc.exe" if os.name == "nt" else "nvcc"
+
+    # First priority: If cuda_home is provided, use its nvcc
+    # This handles CUDA_HOME env var, --cuda-path arg, and ensures consistency
+    if cuda_home:
+        nvcc_path = os.path.join(cuda_home, "bin", nvcc_name)
+        if os.path.exists(nvcc_path):
+            if verbose_cmd:
+                print(f"Using nvcc from cuda_home: {nvcc_path}")
+            return f'"{nvcc_path}"'
+
+    # Second priority: nvcc in PATH (conda, modules, containers)
+    # Note: shutil.which() automatically handles .exe extension on Windows
+    nvcc_in_path = shutil.which("nvcc")
+    if verbose_cmd:
+        if nvcc_in_path:
+            print(f"Using nvcc from PATH: {nvcc_in_path}")
+        else:
+            print("Warning: nvcc not found in PATH or cuda_home, compilation will likely fail")
+
+    return nvcc_name
+
+
+def quote(path):
+    return '"' + path + '"'
+
+
+def add_llvm_bin_to_path(args):
+    """Add the LLVM bin directory to the PATH environment variable if it's set.
+
+    Args:
+        args: The argument namespace containing llvm_path.
+
+    Returns:
+        ``True`` if the PATH was updated, ``False`` otherwise.
+    """
+    if not hasattr(args, "llvm_path") or not args.llvm_path:
+        return False
+
+    # Construct the bin directory path
+    llvm_bin_path = os.path.join(args.llvm_path, "bin")
+
+    # Check if the directory exists
+    if not os.path.isdir(llvm_bin_path):
+        print(f"Warning: LLVM bin directory not found at {llvm_bin_path}")
+        return False
+
+    # Add to PATH environment variable (skip if already present)
+    if llvm_bin_path in os.environ.get("PATH", "").split(os.pathsep):
+        return False
+
+    os.environ["PATH"] = llvm_bin_path + os.pathsep + os.environ.get("PATH", "")
+
+    print(f"Added {llvm_bin_path} to PATH")
+    return True
+
+
+def format_include_paths(paths: list[str], prefix: str) -> str:
+    """Format include directory paths as compiler flags.
+
+    Args:
+        paths: List of include directory paths.
+        prefix: Compiler-specific include flag prefix ('/I' for MSVC, '-I' for GCC/Clang).
+
+    Returns:
+        String of formatted include flags with spaces, e.g., ' /I"path1" /I"path2"'.
+    """
+    return "".join([f' {prefix}"{path}"' for path in paths])
+
+
+def get_llvm_include_paths(args, warp_home_path, mode: str, arch: str) -> list[str]:
+    """Get LLVM include directory paths based on configuration.
+
+    Args:
+        args: The argument namespace containing llvm_path.
+        warp_home_path: Path to the warp package directory.
+        mode: Build mode ('debug' or 'release').
+        arch: Target architecture ('x86_64' or 'aarch64').
+
+    Returns:
+        List of LLVM include directory paths to use for compilation.
+
+    Raises:
+        FileNotFoundError: If user-provided llvm_path include directory doesn't exist.
+    """
+    if hasattr(args, "llvm_path") and args.llvm_path:
+        # Use LLVM include path if the caller supplied one
+        include_path = os.path.join(args.llvm_path, "include")
+        if not os.path.isdir(include_path):
+            print(f"Warning: LLVM include directory not found: {include_path}")
+            print(f"The --llvm-path option points to {args.llvm_path}, but it doesn't contain an 'include' directory.")
+            print("Compilation will likely fail if LLVM headers are needed.")
+        elif verbose_cmd:
+            print(f"Using LLVM from --llvm-path: {include_path}")
+        return [include_path]
+    else:
+        # Use LLVM from source build (external/llvm-project) or packman (_build/host-deps)
+        # Priority: prefer source build over packman if both exist
+        source_build_path = os.path.join(
+            warp_home_path.parent, "external", "llvm-project", "out", "install", f"{mode}-{arch}", "include"
+        )
+        packman_path = os.path.join(
+            warp_home_path.parent,
+            "_build",
+            "host-deps",
+            "llvm-project",
+            f"release-{packman_llvm_platform(arch)}",
+            "include",
+        )
+
+        # Check paths in priority order
+        if os.path.isdir(source_build_path):
+            if verbose_cmd:
+                print(f"Using LLVM from source build: {source_build_path}")
+            return [source_build_path]
+        elif os.path.isdir(packman_path):
+            if verbose_cmd:
+                print(f"Using LLVM from packman: {packman_path}")
+            return [packman_path]
+        else:
+            # Neither path exists yet - return both and let the compiler fail if headers are truly missing
+            # Note: For warp-clang builds, packman fetch happens in build_llvm.py before this is called
+            return [source_build_path, packman_path]
+
+
+def _get_architectures_cu12(
+    ctk_version: tuple[int, int], arch: str, target_platform: str, quick_build: bool = False
+) -> tuple[list[str], list[str]]:
+    """Get architecture flags for CUDA 12.x."""
+    gencode_opts = []
+    clang_arch_flags = []
+
+    # Clang 24 rejects targets below sm_60 because it lowers generic CUDA atomics with system scope.
+    # See https://github.com/llvm/llvm-project/issues/224420.
+    # Keep sm_52 and sm_53 in the nvcc flags because production builds still support Maxwell.
+
+    if quick_build:
+        gencode_opts = ["-gencode=arch=compute_75,code=compute_75"]
+        clang_arch_flags = ["--cuda-gpu-arch=sm_75"]
+    else:
+        if arch == "aarch64" and target_platform == "linux" and ctk_version == (12, 9):
+            # Skip certain architectures for aarch64 with CUDA 12.9 due to CCCL bug
+            print(
+                "[INFO] Skipping sm_52, sm_60, sm_61, and sm_70 targets for ARM due to a CUDA Toolkit bug. "
+                "See https://nvidia.github.io/warp/stable/user_guide/installation.html#cuda-12-9-limitation-on-linux-arm-platforms "
+                "for details."
+            )
+        else:
+            gencode_opts.extend(
+                [
+                    "-gencode=arch=compute_52,code=sm_52",  # Maxwell
+                    "-gencode=arch=compute_60,code=sm_60",  # Pascal
+                    "-gencode=arch=compute_61,code=sm_61",
+                    "-gencode=arch=compute_70,code=sm_70",  # Volta
+                ]
+            )
+            clang_arch_flags.extend(
+                [
+                    "--cuda-gpu-arch=sm_60",
+                    "--cuda-gpu-arch=sm_61",
+                    "--cuda-gpu-arch=sm_70",
+                ]
+            )
+
+        # Desktop architectures
+        gencode_opts.extend(
+            [
+                "-gencode=arch=compute_75,code=sm_75",  # Turing
+                "-gencode=arch=compute_75,code=compute_75",  # Turing (PTX)
+                "-gencode=arch=compute_80,code=sm_80",  # Ampere
+                "-gencode=arch=compute_86,code=sm_86",
+                "-gencode=arch=compute_89,code=sm_89",  # Ada
+                "-gencode=arch=compute_90,code=sm_90",  # Hopper
+            ]
+        )
+        clang_arch_flags.extend(
+            [
+                "--cuda-gpu-arch=sm_75",  # Turing
+                "--cuda-gpu-arch=sm_80",  # Ampere
+                "--cuda-gpu-arch=sm_86",
+                "--cuda-gpu-arch=sm_89",  # Ada
+                "--cuda-gpu-arch=sm_90",  # Hopper
+            ]
+        )
+
+        if ctk_version >= (12, 8):
+            gencode_opts.extend(["-gencode=arch=compute_100,code=sm_100", "-gencode=arch=compute_120,code=sm_120"])
+            clang_arch_flags.extend(["--cuda-gpu-arch=sm_100", "--cuda-gpu-arch=sm_120"])
+
+        # Mobile architectures for aarch64 Linux
+        if arch == "aarch64" and target_platform == "linux":
+            gencode_opts.extend(
+                [
+                    "-gencode=arch=compute_87,code=sm_87",  # Orin
+                    "-gencode=arch=compute_53,code=sm_53",  # X1
+                    "-gencode=arch=compute_62,code=sm_62",  # X2
+                    "-gencode=arch=compute_72,code=sm_72",  # Xavier
+                ]
+            )
+            clang_arch_flags.extend(
+                [
+                    "--cuda-gpu-arch=sm_87",
+                    "--cuda-gpu-arch=sm_62",
+                    "--cuda-gpu-arch=sm_72",
+                ]
+            )
+
+            # Thor support in CUDA 12.8+
+            if ctk_version >= (12, 8):
+                gencode_opts.append("-gencode=arch=compute_101,code=sm_101")  # Thor (CUDA 12 numbering)
+                clang_arch_flags.append("--cuda-gpu-arch=sm_101")
+
+            if ctk_version >= (12, 9):
+                gencode_opts.append("-gencode=arch=compute_121,code=sm_121")
+                clang_arch_flags.append("--cuda-gpu-arch=sm_121")
+
+        # PTX for future hardware (use highest available compute capability)
+        if ctk_version >= (12, 9):
+            gencode_opts.extend(["-gencode=arch=compute_121,code=compute_121"])
+        elif ctk_version >= (12, 8):
+            gencode_opts.extend(["-gencode=arch=compute_120,code=compute_120"])
+        else:
+            gencode_opts.append("-gencode=arch=compute_90,code=compute_90")
+
+    return gencode_opts, clang_arch_flags
+
+
+def _get_architectures_cu13(
+    ctk_version: tuple[int, int], arch: str, target_platform: str, quick_build: bool = False
+) -> tuple[list[str], list[str]]:
+    """Get architecture flags for CUDA 13.x."""
+    gencode_opts = []
+    clang_arch_flags = []
+
+    if quick_build:
+        gencode_opts = ["-gencode=arch=compute_75,code=compute_75"]
+        clang_arch_flags = ["--cuda-gpu-arch=sm_75"]
+    else:
+        # Desktop architectures
+        gencode_opts.extend(
+            [
+                "-gencode=arch=compute_75,code=sm_75",  # Turing
+                "-gencode=arch=compute_75,code=compute_75",  # Turing (PTX)
+                "-gencode=arch=compute_80,code=sm_80",  # Ampere
+                "-gencode=arch=compute_86,code=sm_86",
+                "-gencode=arch=compute_89,code=sm_89",  # Ada
+                "-gencode=arch=compute_90,code=sm_90",  # Hopper
+                "-gencode=arch=compute_100,code=sm_100",  # Blackwell
+                "-gencode=arch=compute_120,code=sm_120",  # Blackwell
+            ]
+        )
+        clang_arch_flags.extend(
+            [
+                "--cuda-gpu-arch=sm_75",  # Turing
+                "--cuda-gpu-arch=sm_80",  # Ampere
+                "--cuda-gpu-arch=sm_86",
+                "--cuda-gpu-arch=sm_89",  # Ada
+                "--cuda-gpu-arch=sm_90",  # Hopper
+                "--cuda-gpu-arch=sm_100",  # Blackwell
+                "--cuda-gpu-arch=sm_120",  # Blackwell
+            ]
+        )
+
+        # Mobile architectures for aarch64 Linux
+        if arch == "aarch64" and target_platform == "linux":
+            gencode_opts.extend(
+                [
+                    "-gencode=arch=compute_87,code=sm_87",  # Orin
+                    "-gencode=arch=compute_110,code=sm_110",  # Thor
+                    "-gencode=arch=compute_121,code=sm_121",  # Spark
+                ]
+            )
+            clang_arch_flags.extend(
+                [
+                    "--cuda-gpu-arch=sm_87",
+                    "--cuda-gpu-arch=sm_110",
+                    "--cuda-gpu-arch=sm_121",
+                ]
+            )
+
+        # PTX for future hardware (use highest available compute capability)
+        gencode_opts.extend(["-gencode=arch=compute_121,code=compute_121"])
+
+    return gencode_opts, clang_arch_flags
+
+
+def build_dll_for_arch(
+    args,
+    dll_path,
+    cpp_paths,
+    cu_paths,
+    arch,
+    libs: list[str] | None = None,
+    mode=None,
+    exported_symbols_file: str | None = None,
+):
+    mode = args.mode if (mode is None) else mode
+    cuda_home = args.cuda_path
+    cuda_cmd = None
+
+    # Derive a unique tag from dll_path for object file names to allow parallel builds
+    _obj_tag = "." + os.path.splitext(os.path.basename(dll_path))[0].replace(".", "_")
+
+    # Add LLVM bin directory to PATH
+    add_llvm_bin_to_path(args)
+
+    if args.quick or cu_paths is None:
+        cuda_compat_enabled = "WP_ENABLE_CUDA_COMPATIBILITY=0"
+    else:
+        cuda_compat_enabled = "WP_ENABLE_CUDA_COMPATIBILITY=1"
+
+    if libs is None:
+        libs = []
+
+    warp_home_path = pathlib.Path(__file__).parent.parent
+    warp_home = warp_home_path.resolve()
+
+    if args.verbose:
+        print(f"Building {dll_path}")
+
+    native_dir = os.path.join(warp_home, "native")
+
+    if cu_paths:
+        # check CUDA Toolkit version
+        ctk_version = get_cuda_toolkit_version(cuda_home)
+        if ctk_version < MIN_CTK_VERSION:
+            raise Exception(
+                f"CUDA Toolkit version {MIN_CTK_VERSION[0]}.{MIN_CTK_VERSION[1]}+ is required (found {ctk_version[0]}.{ctk_version[1]} in {cuda_home})"
+            )
+        if sys.platform == "win32" and arch == "aarch64" and ctk_version < (13, 4):
+            raise RuntimeError(
+                f"CUDA Toolkit 13.4+ is required for Windows ARM64 builds "
+                f"(found {ctk_version[0]}.{ctk_version[1]} in {cuda_home})"
+            )
+
+        # Get architecture flags based on CUDA version
+        if ctk_version >= (13, 0):
+            gencode_opts, clang_arch_flags = _get_architectures_cu13(ctk_version, arch, sys.platform, args.quick)
+        else:
+            gencode_opts, clang_arch_flags = _get_architectures_cu12(ctk_version, arch, sys.platform, args.quick)
+
+        nvcc_opts = [
+            *gencode_opts,
+            "-DWP_BUILD_DLL",
+            "-t0",  # multithreaded compilation
+            "--extended-lambda",
+            "-diag-suppress=221",  # suppress "floating-point value does not fit" warning from INFINITY macro in CUDA headers
+        ]
+
+        if sys.platform == "win32":
+            # CCCL headers require MSVC's standard conforming preprocessor.
+            nvcc_opts.append("-Xcompiler /Zc:preprocessor")
+            if arch == "aarch64":
+                nvcc_opts.append("-target-dir arm64")
+                nvcc_opts.append(f'--compiler-bindir="{os.path.dirname(args.host_compiler)}"')
+
+        # Clang options
+        clang_opts = [
+            *clang_arch_flags,
+            "-std=c++17",
+            "-DWP_BUILD_DLL",
+            "-xcuda",
+            f'--cuda-path="{cuda_home}"',
+            "-D_GLIBCXX_USE_CXX11_ABI=0",
+        ]
+
+        # CUDA 13+ moved CUB into CCCL directory structure
+        if ctk_version >= (13, 0):
+            clang_opts.append(f'-I"{cuda_home}/include/cccl"')
+            # CCCL has #pragma unroll directives that Clang can't always satisfy
+            # Suppress optimizer warnings to avoid -Werror failures
+            clang_opts.append("-Wno-pass-failed")
+
+        if args.compile_time_trace:
+            if ctk_version >= (12, 8):
+                nvcc_opts.append("--fdevice-time-trace=_build/build_lib_@filename@_compile-time-trace")
+            else:
+                print("Warp warning: CUDA version is less than 12.8, compile_time_trace is not supported")
+
+        if args.fast_math:
+            nvcc_opts.append("--use_fast_math")
+
+        # Get nvcc executable (checks PATH first, then CUDA_HOME)
+        nvcc_cmd = find_nvcc_executable(cuda_home)
+
+    # is the library being built with CUDA enabled?
+    cuda_enabled = "WP_ENABLE_CUDA=1" if (cu_paths is not None) else "WP_ENABLE_CUDA=0"
+
+    if args.libmathdx_path:
+        libmathdx_includes = f' -I"{args.libmathdx_path}/include"'
+        mathdx_enabled = "WP_ENABLE_MATHDX=1"
+    else:
+        libmathdx_includes = ""
+        mathdx_enabled = "WP_ENABLE_MATHDX=0"
+
+    if os.name == "nt":
+        cuda_lib_arch = "arm64" if arch == "aarch64" else "x64"
+
+        if args.host_compiler:
+            host_linker = os.path.join(os.path.dirname(args.host_compiler), "link.exe")
+        else:
+            raise RuntimeError("Warp build error: No host compiler was found")
+
+        # Build include paths for LLVM and CUDA
+        llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
+        cpp_includes = format_include_paths(llvm_include_paths, "/I")
+        cuda_includes = f' /I"{cuda_home}/include"' if cu_paths else ""
+        includes = cpp_includes + cuda_includes
+
+        # nvrtc_static.lib is built with /MT and _ITERATOR_DEBUG_LEVEL=0 so if we link it in we must match these options
+        if cu_paths or mode != "debug":
+            runtime = "/MT"
+            iter_dbg = "_ITERATOR_DEBUG_LEVEL=0"
+            debug = "NDEBUG"
+        else:
+            runtime = "/MTd"
+            iter_dbg = "_ITERATOR_DEBUG_LEVEL=2"
+            debug = "_DEBUG"
+
+        cpp_flags = f'/nologo /std:c++17 /GR- /EHsc {runtime} /D "WP_BUILD_DLL" /D "{debug}" /D "{cuda_enabled}" /D "{mathdx_enabled}" /D "{cuda_compat_enabled}" /D "{iter_dbg}" /I"{native_dir}" {includes} '
+
+        if args.mode == "debug":
+            cpp_flags += "/FS /Zi /Od /D WP_ENABLE_DEBUG=1"
+            linkopts = ["/DLL", "/DEBUG"]
+        elif args.mode == "release":
+            cpp_flags += "/Ox /D WP_ENABLE_DEBUG=0"
+            linkopts = ["/DLL"]
+        else:
+            raise RuntimeError(f"Unrecognized build configuration (debug, release), got: {args.mode}")
+
+        if args.verify_fp:
+            cpp_flags += ' /D "WP_VERIFY_FP"'
+
+        if args.fast_math:
+            cpp_flags += ' /fp:fast /D "WP_FAST_MATH"'
+
+        if args.sanitize:
+            cpp_flags += f" /fsanitize={args.sanitize}"
+            # MSVC ASan-instrumented STL headers emit annotate_string/annotate_vector
+            # symbols; the uninstrumented .cu objects emit the same symbols with the
+            # opposite value and link.exe rejects the mix (LNK2038). Disabling the
+            # container annotations realigns both sides at the cost of std::string /
+            # std::vector unused-capacity overflow detection only.
+            if args.sanitize == "address":
+                cpp_flags += " /D_DISABLE_STRING_ANNOTATION=1 /D_DISABLE_VECTOR_ANNOTATION=1"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            futures, wall_clock = [], time.perf_counter_ns()
+
+            cpp_cmds = []
+            for cpp_path in cpp_paths:
+                cpp_out = cpp_path + _obj_tag + ".obj"
+                linkopts.append(quote(cpp_out))
+                # Add warning suppressions for clang.cpp to avoid LLVM header warnings
+                extra_flags = ""
+                if "clang/clang.cpp" in cpp_path.replace("\\", "/"):
+                    extra_flags = " /wd4624"  # suppress C4624: destructor was implicitly defined as deleted
+                cpp_cmd = f'"{args.host_compiler}" {cpp_flags}{extra_flags} -c "{cpp_path}" /Fo"{cpp_out}"'
+                cpp_cmds.append(cpp_cmd)
+
+            if args.jobs <= 1:
+                with ScopedTimer("build", active=args.verbose):
+                    for cpp_cmd in cpp_cmds:
+                        run_cmd(cpp_cmd)
+            else:
+                futures = [executor.submit(run_cmd, cmd=cpp_cmd) for cpp_cmd in cpp_cmds]
+
+            cuda_cmds = []
+            if cu_paths:
+                for cu_path in cu_paths:
+                    cu_out = cu_path + _obj_tag + ".o"
+
+                    _nvcc_opts = [
+                        opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
+                    ]
+
+                    if mode == "debug":
+                        cuda_cmd = f'{nvcc_cmd} --std=c++17 --compiler-options=/MT,/Zi,/Od -g -G -O0 -DNDEBUG -D_ITERATOR_DEBUG_LEVEL=0 -I"{native_dir}" -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                    elif mode == "release":
+                        cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 {" ".join(_nvcc_opts)} -I"{native_dir}" -DNDEBUG -DWP_ENABLE_CUDA=1 -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+
+                    cuda_cmds.append(cuda_cmd)
+
+                    linkopts.append(quote(cu_out))
+
+                if args.use_dynamic_cuda:
+                    linkopts.append(
+                        f'cudart.lib nvrtc.lib nvptxcompiler_static.lib ws2_32.lib user32.lib /LIBPATH:"{cuda_home}/lib/{cuda_lib_arch}"'
+                    )
+                else:
+                    linkopts.append(
+                        f'cudart_static.lib nvrtc_static.lib nvrtc-builtins_static.lib nvptxcompiler_static.lib ws2_32.lib user32.lib ntdll.lib /LIBPATH:"{cuda_home}/lib/{cuda_lib_arch}"'
+                    )
+
+                if args.libmathdx_path:
+                    if args.use_dynamic_cuda:
+                        linkopts.append(
+                            f'nvJitLink.lib /LIBPATH:"{args.libmathdx_path}/lib/{cuda_lib_arch}" mathdx.lib'
+                        )
+                    else:
+                        linkopts.append(
+                            f'nvJitLink_static.lib /LIBPATH:"{args.libmathdx_path}/lib/{cuda_lib_arch}" mathdx_static.lib'
+                        )
+
+            if args.jobs <= 1:
+                with ScopedTimer("build_cuda", active=args.verbose):
+                    for cuda_cmd in cuda_cmds:
+                        run_cmd(cuda_cmd)
+            else:
+                futures.extend([executor.submit(run_cmd, cmd=cuda_cmd) for cuda_cmd in cuda_cmds])
+
+            if futures:
+                done, pending = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_EXCEPTION)
+                for d in done:
+                    if e := d.exception():
+                        for f in pending:
+                            f.cancel()
+                        raise e
+                elapsed = (time.perf_counter_ns() - wall_clock) / 1000000.0
+                print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
+
+        with ScopedTimer("link", active=args.verbose):
+            implib_path = os.path.splitext(dll_path)[0] + ".lib"
+            link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}" /IMPLIB:"{implib_path}"'
+            run_cmd(link_cmd)
+
+    else:
+        # Unix compilation
+        cuda_compiler = "clang++" if args.clang_build_toolchain else "nvcc"
+        cpp_compiler = "clang++" if args.clang_build_toolchain else args.host_compiler
+
+        # Build include paths for LLVM and CUDA
+        llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
+        cpp_includes = format_include_paths(llvm_include_paths, "-I")
+        cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
+        includes = cpp_includes + cuda_includes
+
+        if sys.platform == "darwin":
+            version = f"--target={arch}-apple-macos11"
+        else:
+            compiler_name = os.path.basename(cpp_compiler)
+            # Check for GCC compilers (g++, g++-11, x86_64-linux-gnu-g++, etc.)
+            # Exclude clang to avoid false match on "clang++" which ends with "g++"
+            if "clang" not in compiler_name and (compiler_name.endswith("g++") or "g++-" in compiler_name):
+                version = "-fabi-version=13"  # GCC 8.2+
+            else:
+                version = ""
+
+        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -DWP_BUILD_DLL -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
+
+        if mode == "debug":
+            cpp_flags += "-Og -g -D_DEBUG -DWP_ENABLE_DEBUG=1"
+
+        if mode == "release":
+            cpp_flags += "-O3 -DNDEBUG -DWP_ENABLE_DEBUG=0"
+
+        if args.verify_fp:
+            cpp_flags += " -DWP_VERIFY_FP"
+
+        if args.fast_math:
+            cpp_flags += " -ffast-math -DWP_FAST_MATH"
+
+        if args.sanitize:
+            cpp_flags += f" -fsanitize={args.sanitize}"
+
+        ld_inputs = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            futures, wall_clock = [], time.perf_counter_ns()
+
+            cpp_cmds = []
+            for cpp_path in cpp_paths:
+                cpp_out = cpp_path + _obj_tag + ".o"
+                ld_inputs.append(quote(cpp_out))
+                extra_flags = ""
+                cpp_cmd = f'{cpp_compiler} {cpp_flags}{extra_flags} -c "{cpp_path}" -o "{cpp_out}"'
+                cpp_cmds.append(cpp_cmd)
+
+            if args.jobs <= 1:
+                with ScopedTimer("build", active=args.verbose):
+                    for cpp_cmd in cpp_cmds:
+                        run_cmd(cpp_cmd)
+            else:
+                futures = [executor.submit(run_cmd, cmd=cpp_cmd) for cpp_cmd in cpp_cmds]
+
+            cuda_cmds = []
+            if cu_paths:
+                for cu_path in cu_paths:
+                    cu_out = cu_path + _obj_tag + ".o"
+
+                    _nvcc_opts = [
+                        opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
+                    ]
+
+                    if cuda_compiler == "nvcc":
+                        if mode == "debug":
+                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-D_GLIBCXX_USE_CXX11_ABI=0 -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                        elif mode == "release":
+                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-D_GLIBCXX_USE_CXX11_ABI=0 {" ".join(_nvcc_opts)} -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                    else:
+                        # Use Clang compiler
+                        if mode == "debug":
+                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version -Wno-openmp-target {" ".join(clang_opts)} -g -O0 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                        elif mode == "release":
+                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version -Wno-openmp-target {" ".join(clang_opts)} -O3 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+
+                    cuda_cmds.append(cuda_cmd)
+
+                    ld_inputs.append(quote(cu_out))
+
+                if args.use_dynamic_cuda:
+                    ld_inputs.append(
+                        f'-L"{cuda_home}/lib64" -L"{cuda_home}/lib" -lcudart -lnvrtc -lnvptxcompiler_static -lpthread -ldl -lrt'
+                    )
+                else:
+                    ld_inputs.append(
+                        f'-L"{cuda_home}/lib64" -lcudart_static -lnvrtc_static -lnvrtc-builtins_static -lnvptxcompiler_static -lpthread -ldl -lrt'
+                    )
+
+                if args.libmathdx_path:
+                    if args.use_dynamic_cuda:
+                        ld_inputs.append(f"-lnvJitLink -L{quote(args.libmathdx_path + '/lib')} -lmathdx")
+                    else:
+                        ld_inputs.append(f"-lnvJitLink_static -L{quote(args.libmathdx_path + '/lib')} -lmathdx_static")
+
+            if args.jobs <= 1:
+                with ScopedTimer("build_cuda", active=args.verbose):
+                    for cuda_cmd in cuda_cmds:
+                        run_cmd(cuda_cmd)
+            else:
+                futures.extend([executor.submit(run_cmd, cmd=cuda_cmd) for cuda_cmd in cuda_cmds])
+
+            if futures:
+                done, pending = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_EXCEPTION)
+                for d in done:
+                    if e := d.exception():
+                        for f in pending:
+                            f.cancel()
+                        raise e
+                elapsed = (time.perf_counter_ns() - wall_clock) / 1000000.0
+                print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
+
+        opt_exported_symbols = ""
+
+        if sys.platform == "darwin":
+            # macOS linker rejects undefined symbols by default. Permit dynamic
+            # lookup here, then validate below so unexpected unresolved symbols
+            # produce a consistent diagnostic across platforms.
+            opt_undefined = "-Wl,-undefined,dynamic_lookup"
+            opt_exclude_libs = ""
+            opt_static_runtime = ""
+            if exported_symbols_file is not None:
+                opt_exported_symbols = f'-Wl,-exported_symbols_list,"{exported_symbols_file}"'
+        else:
+            # -z lazy: pin lazy PLT binding so dlopen(..., RTLD_LAZY) works for non-Python
+            # C++ hosts even on distros that flip the default to -z now via RELRO.
+            opt_undefined = "-Wl,-z,lazy"
+            opt_exclude_libs = "-Wl,--exclude-libs,ALL"
+            opt_static_runtime = (
+                f"-static-libstdc++ -static-libgcc -Wl,--version-script={quote(native_dir + '/warp.map')}"
+            )
+
+        sanitize_ld = f" -fsanitize={args.sanitize}" if args.sanitize else ""
+
+        with ScopedTimer("link", active=args.verbose):
+            origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
+            link_cmd = f"{cpp_compiler} {version} -shared -Wl,-rpath,'{origin}' {opt_static_runtime} {opt_undefined} {opt_exported_symbols} {opt_exclude_libs}{sanitize_ld} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
+            run_cmd(link_cmd)
+
+            # Platform-specific paths collect all undefined symbol names.
+            undefined = []
+            if sys.platform == "darwin":
+                # nm -m -u lists undefined symbols with source annotations. Symbols
+                # from linked libraries show "(from libName)", while symbols allowed
+                # through -undefined dynamic_lookup show "(dynamically looked up)".
+                nm_output = subprocess.check_output(["nm", "-m", "-u", dll_path])
+                for line in nm_output.decode().splitlines():
+                    if "(dynamically looked up)" not in line:
+                        continue
+                    # Format: "   (undefined) external _SymName (dynamically looked up)"
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        undefined.append(parts[2].lstrip("_"))
+            else:
+                # readelf --dyn-syms lists dynamic symbols with type info. Symbols
+                # from linked dependencies (glibc, libm) have type FUNC or OBJECT,
+                # while truly undefined symbols have type NOTYPE.
+                # Format: "  54: 0...0  0 NOTYPE  GLOBAL DEFAULT  UND PyFloat_FromDouble"
+                readelf_output = subprocess.check_output(["readelf", "-W", "--dyn-syms", dll_path])
+                for line in readelf_output.decode().splitlines():
+                    fields = line.split()
+                    if len(fields) < 8:
+                        continue
+                    sym_type, sym_bind, sym_ndx, sym_name = fields[3], fields[4], fields[6], fields[7]
+                    if sym_bind == "GLOBAL" and sym_ndx == "UND" and sym_type == "NOTYPE":
+                        undefined.append(sym_name)
+
+            if undefined:
+                raise RuntimeError("Unexpected undefined symbols in " + dll_path + ":\n" + "\n".join(undefined))
+
+            # Strip symbols to reduce the binary size
+            if mode == "release":
+                if sys.platform == "darwin":
+                    run_cmd(f"strip -x {quote(dll_path)}")  # Strip all local symbols
+                else:  # Linux
+                    # Strip symbols not needed for dynamic linking, except those needed to support debugging JIT-compiled code
+                    run_cmd(
+                        f"strip --strip-unneeded --keep-symbol=__jit_debug_register_code "
+                        f"--keep-symbol=__jit_debug_descriptor {quote(dll_path)}"
+                    )
+
+
+def build_dll(args, dll_path, cpp_paths, cu_paths, libs=None):
+    if sys.platform == "darwin":
+        # build for ARM64 only (may be cross-compiled from Intel Mac)
+        build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, "aarch64", libs)
+    else:
+        build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, machine_architecture(), libs)

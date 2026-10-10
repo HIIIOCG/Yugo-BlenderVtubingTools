@@ -1,0 +1,33 @@
+0.4.0
+-----
+- 半透明參考骨架跟隨策略實際使用的延遲 Reference Motion，Solid 模式可見，
+  透明度可調整；物理角色倒地不會改變參考顯示。
+- Generate Targets 建立 11 個位置目標。標準 Blender 移動操作調整的局部
+  位移會隨參考框架跟隨，並保留於暫停、Reset、重建及存檔重載。
+- Position Strength、Spring Frequency、Spring Damping、Max Force / Point
+  即時控制原生 PhysX 有限點吸引力。只有位置目標，模型與觀測契約不變。
+- 目標生成、清除與 Physics 節點複製／刪除遵循各自的物件 ownership，
+  不修改來源角色或其他節點的目標。保存後載入不自動啟動背景程序。
+
+0.3.1
+-----
+- Tracker 節點改名 ProtoMotions，Model 顯示 SMPL AMASS Tracker，預設 LIVE。
+- Humanoid Motion 子骨骼輸出旋轉，僅 hips 帶位移，修正 connected 骨骼與
+  不同角色比例下的 Apply 衝突。
+- 舊 Built-in 座標 binding 在 Play 時自動重新 Setup。
+
+0.3.0
+-----
+- 播放或暫停中增刪、編輯碰撞輸入，不重建 SMPL 策略或背景程序。
+
+0.2.0
+-----
+- 單次 Play 自動 Setup／Build、場景剛體、VRM spring adapter 與 Root Support。
+
+0.1.1
+-----
+- Built-in SMPL 模式可在無 Bone Map、無來源角色的情況下運行。
+
+0.1.0
+-----
+- Standalone CPU PhysX 與 ProtoMotions SMPL AMASS learned tracker 初版。

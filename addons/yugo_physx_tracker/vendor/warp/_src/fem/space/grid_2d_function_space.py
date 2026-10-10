@@ -1,0 +1,259 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any
+
+import numpy as np
+
+import warp as wp
+from warp._src.fem import cache
+from warp._src.fem.geometry import Grid2D
+from warp._src.fem.polynomial import is_closed
+from warp._src.fem.types import NULL_NODE_INDEX, ElementIndex
+
+from .shape import SquareBipolynomialShapeFunctions, SquareBSplineShapeFunctions, SquareShapeFunction
+from .topology import SpaceTopology, forward_base_topology
+
+
+class Grid2DSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid2D, shape: SquareShapeFunction):
+        self._shape = shape
+        self.TopologyArg = grid.SideArg
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self.element_node_index = self._make_element_node_index()
+
+    @property
+    def name(self):
+        return f"{self.geometry.name}_{self._shape.name}"
+
+    def fill_topo_arg(self, arg, device):
+        self.geometry.fill_side_arg(arg, device)
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            self.geometry._vertex_count_per_environment() * self._shape.VERTEX_NODE_COUNT
+            + self.geometry._side_count_per_environment() * self._shape.EDGE_NODE_COUNT
+            + self.geometry._cell_count_per_environment() * self._shape.INTERIOR_NODE_COUNT
+        )
+
+    def _make_element_node_index(self):
+        VERTEX_NODE_COUNT = self._shape.VERTEX_NODE_COUNT
+        EDGE_NODE_COUNT = self._shape.EDGE_NODE_COUNT
+        INTERIOR_NODE_COUNT = self._shape.INTERIOR_NODE_COUNT
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            node_type, type_instance, type_index = self._shape.node_type_and_type_index(node_index_in_elt)
+
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                res = cell_arg.res
+                cell_count = Grid2D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                env_node_count = Grid2D.vertex_count_per_environment(res) * VERTEX_NODE_COUNT
+                if wp.static(EDGE_NODE_COUNT > 0):
+                    env_node_count += Grid2D.side_count_per_environment(res) * EDGE_NODE_COUNT
+                if wp.static(INTERIOR_NODE_COUNT > 0):
+                    env_node_count += cell_count * INTERIOR_NODE_COUNT
+                env_node_offset = env_index * env_node_count
+
+            if wp.static(VERTEX_NODE_COUNT > 0):
+                if node_type == SquareShapeFunction.VERTEX:
+                    return (
+                        env_node_offset
+                        + Grid2DSpaceTopology._vertex_index(cell_arg, local_element_index, type_instance)
+                        * VERTEX_NODE_COUNT
+                        + type_index
+                    )
+
+            res = cell_arg.res
+            vertex_count = Grid2D.vertex_count_per_environment(res)
+            global_offset = vertex_count * VERTEX_NODE_COUNT
+
+            if wp.static(INTERIOR_NODE_COUNT > 0):
+                if node_type == SquareShapeFunction.INTERIOR:
+                    return env_node_offset + global_offset + local_element_index * INTERIOR_NODE_COUNT + type_index
+
+                cell_count = Grid2D.cell_count_per_environment(res)
+                global_offset += INTERIOR_NODE_COUNT * cell_count
+
+            if wp.static(EDGE_NODE_COUNT > 0):
+                axis = 1 - (node_type - SquareShapeFunction.EDGE_X)
+
+                cell = Grid2D.get_cell(cell_arg.res, local_element_index)
+                origin = Grid2D.orient(axis, cell) + wp.vec2i(type_instance, 0)
+
+                side = Grid2D.Side(axis, origin)
+                side_index = self.geometry._side_index(topo_arg, side)
+
+                return env_node_offset + global_offset + EDGE_NODE_COUNT * side_index + type_index
+
+            return NULL_NODE_INDEX  # unreachable
+
+        return element_node_index
+
+    @wp.func
+    def _vertex_coords(vidx_in_cell: int):
+        x = vidx_in_cell // 2
+        y = vidx_in_cell - 2 * x
+        return wp.vec2i(x, y)
+
+    @wp.func
+    def _vertex_index(cell_arg: Any, cell_index: ElementIndex, vidx_in_cell: int):
+        res = cell_arg.res
+        x_stride = res[1] + 1
+
+        corner = Grid2D.get_cell(res, cell_index) + Grid2DSpaceTopology._vertex_coords(vidx_in_cell)
+        return Grid2D._from_2d_index(x_stride, corner)
+
+
+class GridBipolynomialSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid2D, shape: SquareBipolynomialShapeFunctions):
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self._shape = shape
+        self.element_node_index = self._make_element_node_index()
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            (self.geometry.res[0] * self._shape.ORDER + 1) * (self.geometry.res[1] * self._shape.ORDER + 1)
+        )
+
+    def _make_element_node_index(self):
+        ORDER = self._shape.ORDER
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            res = cell_arg.res
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                cell_count = Grid2D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                node_count = (res[0] * ORDER + 1) * (res[1] * ORDER + 1)
+                env_node_offset = env_index * node_count
+
+            cell = Grid2D.get_cell(res, local_element_index)
+
+            node_i = node_index_in_elt // (ORDER + 1)
+            node_j = node_index_in_elt - (ORDER + 1) * node_i
+
+            node_x = ORDER * cell[0] + node_i
+            node_y = ORDER * cell[1] + node_j
+
+            node_pitch = (res[1] * ORDER) + 1
+            node_index = node_pitch * node_x + node_y
+
+            return env_node_offset + node_index
+
+        return element_node_index
+
+    def node_grid(self):
+        res = self.geometry.res
+
+        cell_coords = np.array(self._shape.LOBATTO_COORDS)[:-1]
+
+        grid_coords_x = np.repeat(np.arange(0, res[0], dtype=float), len(cell_coords)) + np.tile(
+            cell_coords, reps=res[0]
+        )
+        grid_coords_x = np.append(grid_coords_x, res[0])
+        X = grid_coords_x * self.geometry.cell_size[0] + self.geometry.origin[0]
+
+        grid_coords_y = np.repeat(np.arange(0, res[1], dtype=float), len(cell_coords)) + np.tile(
+            cell_coords, reps=res[1]
+        )
+        grid_coords_y = np.append(grid_coords_y, res[1])
+        Y = grid_coords_y * self.geometry.cell_size[1] + self.geometry.origin[1]
+
+        return np.meshgrid(X, Y, indexing="ij")
+
+
+class GridBSplineSpaceTopology(SpaceTopology):
+    def __init__(self, grid: Grid2D, shape: SquareBSplineShapeFunctions):
+        super().__init__(grid, shape.NODES_PER_ELEMENT)
+        self._shape = shape
+
+        self._padding = self._shape.PADDING
+
+        self.element_node_index = self._make_element_node_index()
+
+    def node_count(self) -> int:
+        return self.geometry.environment_count() * (
+            (self.geometry.res[0] + 2 * self._padding + 1) * (self.geometry.res[1] + 2 * self._padding + 1)
+        )
+
+    def _make_element_node_index(self):
+        PADDING = self._padding
+        single_env = self.geometry.environment_count() <= 1
+
+        @cache.dynamic_func(suffix=(self.name, single_env))
+        def element_node_index(
+            cell_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            res = cell_arg.res
+            if wp.static(single_env):
+                local_element_index = element_index
+                env_node_offset = 0
+            else:
+                cell_count = Grid2D.cell_count_per_environment(res)
+                env_index = element_index // cell_count
+                local_element_index = element_index - cell_count * env_index
+                node_count = (res[0] + 2 * PADDING + 1) * (res[1] + 2 * PADDING + 1)
+                env_node_offset = env_index * node_count
+
+            cell = Grid2D.get_cell(res, local_element_index)
+
+            node_i, node_j = self._shape._node_ij(node_index_in_elt)
+
+            node_x = cell[0] + node_i + PADDING
+            node_y = cell[1] + node_j + PADDING
+
+            node_pitch_y = res[1] + 2 * PADDING + 1
+            node_index = node_pitch_y * node_x + node_y
+
+            return env_node_offset + node_index
+
+        return element_node_index
+
+    def node_grid(self):
+        res = self.geometry.res + 2 * self._padding + 1
+
+        grid_coords_x = np.arange(0, res[0], dtype=float) - self._padding
+        X = grid_coords_x * self.geometry.cell_size[0] + self.geometry.origin[0]
+
+        grid_coords_y = np.arange(0, res[1], dtype=float) - self._padding
+        Y = grid_coords_y * self.geometry.cell_size[1] + self.geometry.origin[1]
+
+        return np.meshgrid(X, Y, indexing="ij")
+
+
+def make_grid_2d_space_topology(grid: Grid2D, shape: SquareShapeFunction):
+    if isinstance(shape, SquareBipolynomialShapeFunctions) and is_closed(shape.family):
+        return forward_base_topology(GridBipolynomialSpaceTopology, grid, shape)
+
+    if isinstance(shape, SquareBSplineShapeFunctions):
+        return forward_base_topology(GridBSplineSpaceTopology, grid, shape)
+
+    if isinstance(shape, SquareShapeFunction):
+        return forward_base_topology(Grid2DSpaceTopology, grid, shape)
+
+    raise ValueError(f"Unsupported shape function {shape.name}")

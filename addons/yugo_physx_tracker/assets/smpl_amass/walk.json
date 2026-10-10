@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/NVlabs/ProtoMotions/blob/4a905b998101333a2fb91f2de8e2cab4bd0db68e/data/motions/smpl_humanoid_walk.npy",
+  "source_sha256": "d475b047d8338df476d76dda77a5dee5538cdc5661bad90c4ae1b94575df170c",
+  "output_sha256": "2422575ad41aee3ee5b0d598e1138c9102d42195c9c8a192739c358377414297",
+  "frames": 511,
+  "fps": 100.0,
+  "duration": 5.1,
+  "conversion": "global XYZW -> WXYZ, FK from source SMPL rest translations; finite-difference velocities"
+}

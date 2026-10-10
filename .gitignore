@@ -1,6 +1,8 @@
 # Python
 __pycache__/
 *.py[cod]
+# The pinned PhysX distribution needs its native Python extensions.
+!addons/yugo_physx_tracker/vendor/**/*.pyd
 
 # Blender recovery files
 *.blend[1-9]
@@ -10,6 +12,7 @@ __pycache__/
 /dist/
 /build/
 *.zip
+!addons/yugo_physx_tracker/vendor/ovphysx-0.6.3.dist-info/licenses/ovphysx-LICENSES.zip
 
 # Local environments and tools
 .venv/

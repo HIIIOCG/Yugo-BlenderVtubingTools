@@ -1,0 +1,1023 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from functools import cached_property
+from typing import Any, ClassVar
+
+import warp as wp
+from warp._src.codegen import Struct
+from warp._src.fem import cache
+from warp._src.fem.types import (
+    NULL_ELEMENT_INDEX,
+    OUTSIDE,
+    Coords,
+    ElementIndex,
+    ElementKind,
+    Sample,
+    cached_coords_type,
+    cached_sample_type,
+    make_free_sample,
+)
+from warp._src.types import is_array
+
+from .element import Element
+
+_mat32 = wp.types.matrix(shape=(3, 2), dtype=float)
+_mat32_f64 = wp.types.matrix(shape=(3, 2), dtype=wp.float64)
+
+_NULL_BVH_ID = wp.uint64(0)
+_COORD_LOOKUP_ITERATIONS = 24
+_COORD_LOOKUP_ITERATIONS_F64 = 48
+_COORD_LOOKUP_STEP = 1.0
+_COORD_LOOKUP_STEP_F64 = wp.float64(1.0)
+_COORD_LOOKUP_EPS = float(2**-20)
+_COORD_LOOKUP_EPS_F64 = float(2**-44)
+_BVH_MIN_PADDING = float(2**-16)
+_BVH_MAX_PADDING = float(2**16)
+
+
+class Geometry:
+    """
+    Interface class for discrete geometries
+
+    A geometry is composed of cells and sides. Sides may be boundary or interior (between cells).
+    """
+
+    dimension: int = 0
+    """Dimension of the embedding space."""
+
+    _bvhs = None
+
+    @property
+    def scalar_type(self):
+        """Scalar type (``wp.float32`` or ``wp.float64``) for this geometry's coordinate and weight computations."""
+        return wp.float32
+
+    @cached_property
+    def coords_type(self):
+        """Warp vector type for element coordinates matching this geometry's scalar precision."""
+        return cached_coords_type(self.scalar_type)
+
+    @cached_property
+    def sample_type(self):
+        """Warp struct type for samples matching this geometry's scalar precision."""
+        return cached_sample_type(self.scalar_type)
+
+    def cell_count(self):
+        """Number of cells in the geometry"""
+        raise NotImplementedError
+
+    def side_count(self):
+        """Number of sides in the geometry"""
+        raise NotImplementedError
+
+    def boundary_side_count(self):
+        """Number of boundary sides (sides with a single neighbour cell) in the geometry"""
+        raise NotImplementedError
+
+    def environment_count(self):
+        """Number of topologically independent environments represented by this geometry."""
+        return getattr(self, "_env_count", 1)
+
+    @property
+    def cell_env(self):
+        """Optional per-cell environment indices."""
+        return getattr(self, "_cell_env", None)
+
+    def reference_cell(self) -> Element:
+        """Prototypical element for a cell"""
+        raise NotImplementedError
+
+    def reference_side(self) -> Element:
+        """Prototypical element for a side"""
+        raise NotImplementedError
+
+    @property
+    def cell_dimension(self) -> int:
+        """Manifold dimension of the geometry cells"""
+        return self.reference_cell().prototype.dimension
+
+    @property
+    def base(self) -> "Geometry":
+        """Return the base geometry from which this geometry derives its topology. Usually `self`."""
+        return self
+
+    @property
+    def name(self) -> str:
+        """Name of the geometry, including environment and scalar type suffixes."""
+        base = self.__class__.__name__
+        if self.environment_count() > 1:
+            base = f"{base}_env"
+        if self.scalar_type != wp.float32:
+            return f"{base}_f64"
+        return base
+
+    def __str__(self) -> str:
+        return self.name
+
+    CellArg: Struct
+    """Structure containing arguments to be passed to device functions evaluating cell-related quantities."""
+
+    SideArg: Struct
+    """Structure containing arguments to be passed to device functions evaluating side-related quantities."""
+
+    SideIndexArg: Struct
+    """Structure containing arguments to be passed to device functions for indexing sides."""
+
+    @cache.cached_arg_value
+    def cell_arg_value(self, device) -> "Geometry.CellArg":
+        """Value of the arguments to be passed to cell-related device functions"""
+        args = self.CellArg()
+        self.fill_cell_arg(args, device)
+        return args
+
+    def fill_cell_arg(self, args: "Geometry.CellArg", device):
+        """Fill the arguments to be passed to cell-related device functions"""
+        if self.cell_arg_value is __class__.cell_arg_value:
+            raise NotImplementedError()
+        args.assign(self.cell_arg_value(device))
+
+    @staticmethod
+    def cell_position(args: "Geometry.CellArg", s: "Sample"):
+        """Device function returning the world position of a cell sample point"""
+        raise NotImplementedError
+
+    @staticmethod
+    def cell_deformation_gradient(args: "Geometry.CellArg", s: "Sample"):
+        """Device function returning the transpose of the gradient of world position with respect to reference cell"""
+        raise NotImplementedError
+
+    @staticmethod
+    def cell_inverse_deformation_gradient(args: "Geometry.CellArg", s: "Sample"):
+        """Device function returning the matrix right-transforming a gradient w.r.t. cell space to a gradient w.r.t. world space
+        (i.e. the inverse deformation gradient)
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def cell_measure(args: "Geometry.CellArg", s: "Sample"):
+        """Device function returning the measure determinant (e.g. volume, area) at a given point"""
+        raise NotImplementedError
+
+    @wp.func
+    def cell_measure_ratio(args: Any, s: Sample):
+        """Device function returning the ratio between cell and neighbor measures."""
+        return 1.0
+
+    @wp.func
+    def cell_measure_ratio(args: Any, s: cached_sample_type(wp.float64)):
+        return wp.float64(1.0)
+
+    @staticmethod
+    def cell_normal(args: "Geometry.CellArg", s: "Sample"):
+        """Device function returning the element normal at a sample point.
+
+        For elements with the same dimension as the embedding space, this will be zero."""
+        raise NotImplementedError
+
+    @wp.func
+    def cell_environment_index(args: Any, cell_index: ElementIndex):
+        """Device function returning the environment index for a cell."""
+        return 0
+
+    @wp.func
+    def cell_environment_index(args: Any, s: Sample):
+        """Device function returning the environment index for a cell sample."""
+        return 0
+
+    @cache.cached_arg_value
+    def side_arg_value(self, device) -> "Geometry.SideArg":
+        """Value of the arguments to be passed to side-related device functions"""
+        args = self.SideArg()
+        self.fill_side_arg(args, device)
+        return args
+
+    def fill_side_arg(self, args: "Geometry.SideArg", device):
+        """Fill the arguments to be passed to side-related device functions"""
+        if self.side_arg_value is __class__.side_arg_value:
+            raise NotImplementedError()
+        args.assign(self.side_arg_value(device))
+
+    @cache.cached_arg_value
+    def side_index_arg_value(self, device) -> "Geometry.SideIndexArg":
+        """Value of the arguments to be passed to side-related device functions"""
+        args = self.SideIndexArg()
+        self.fill_side_index_arg(args, device)
+        return args
+
+    def fill_side_index_arg(self, args: "Geometry.SideIndexArg", device):
+        """Fill the arguments to be passed to side-related device functions"""
+        if self.side_index_arg_value is __class__.side_index_arg_value:
+            raise NotImplementedError()
+        args.assign(self.side_index_arg_value(device))
+
+    @staticmethod
+    def boundary_side_index(args: "Geometry.SideIndexArg", boundary_side_index: int):
+        """Device function returning the side index corresponding to a boundary side"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_position(args: "Geometry.SideArg", s: "Sample"):
+        """Device function returning the side position at a sample point"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_deformation_gradient(args: "Geometry.SideArg", s: "Sample"):
+        """Device function returning the gradient of world position with respect to reference side"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_inner_inverse_deformation_gradient(args: "Geometry.SideArg", side_index: ElementIndex, coords: Coords):
+        """Device function returning the matrix right-transforming a gradient w.r.t. inner cell space to a gradient w.r.t. world space
+        (i.e. the inverse deformation gradient)
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def side_outer_inverse_deformation_gradient(args: "Geometry.CellArg", side_index: ElementIndex, coords: Coords):
+        """Device function returning the matrix right-transforming a gradient w.r.t. outer cell space to a gradient w.r.t. world space
+        (i.e. the inverse deformation gradient)
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def side_measure(args: "Geometry.SideArg", s: "Sample"):
+        """Device function returning the measure determinant (e.g. volume, area) at a given point"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_measure_ratio(args: "Geometry.SideArg", s: "Sample"):
+        """Device function returning the ratio of the measure of a side to that of its neighbour cells"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_normal(args: "Geometry.SideArg", s: "Sample"):
+        """Device function returning the element normal at a sample point"""
+        raise NotImplementedError
+
+    @wp.func
+    def side_environment_index(args: Any, side_index: ElementIndex):
+        """Device function returning the environment index for a side."""
+        return 0
+
+    @wp.func
+    def side_environment_index(args: Any, s: Sample):
+        """Device function returning the environment index for a side sample."""
+        return 0
+
+    @staticmethod
+    def side_inner_cell_index(args: "Geometry.SideArg", side_index: ElementIndex):
+        """Device function returning the inner cell index for a given side"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_outer_cell_index(args: "Geometry.SideArg", side_index: ElementIndex):
+        """Device function returning the outer cell index for a given side"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_inner_cell_coords(args: "Geometry.SideArg", side_index: ElementIndex, side_coords: Coords):
+        """Device function returning the coordinates of a point on a side in the inner cell"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_outer_cell_coords(args: "Geometry.SideArg", side_index: ElementIndex, side_coords: Coords):
+        """Device function returning the coordinates of a point on a side in the outer cell"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_from_cell_coords(
+        args: "Geometry.SideArg",
+        side_index: ElementIndex,
+        element_index: ElementIndex,
+        element_coords: Coords,
+    ):
+        """Device function converting coordinates on a cell to coordinates on a side, or :data:`warp.fem.OUTSIDE`"""
+        raise NotImplementedError
+
+    @staticmethod
+    def side_to_cell_arg(side_arg: "Geometry.SideArg"):
+        """Device function converting a side-related argument value to a cell-related argument value, for promoting trace samples to the full space"""
+        raise NotImplementedError
+
+    # Default implementations for dependent quantities
+    # Can be overridden in derived classes if more efficient implementations exist
+
+    _dynamic_attribute_constructors: ClassVar = {
+        "cell_inverse_deformation_gradient": lambda obj: obj._make_cell_inverse_deformation_gradient(),
+        "cell_measure": lambda obj: obj._make_cell_measure(),
+        "cell_normal": lambda obj: obj._make_cell_normal(),
+        "side_inverse_deformation_gradient": lambda obj: obj._make_side_inverse_deformation_gradient(),
+        "side_inner_inverse_deformation_gradient": lambda obj: obj._make_side_inner_inverse_deformation_gradient(),
+        "side_outer_inverse_deformation_gradient": lambda obj: obj._make_side_outer_inverse_deformation_gradient(),
+        "side_measure": lambda obj: obj._make_side_measure(),
+        "side_measure_ratio": lambda obj: obj._make_side_measure_ratio(),
+        "side_normal": lambda obj: obj._make_side_normal(),
+        "compute_cell_bounds": lambda obj: obj._make_compute_cell_bounds(),
+    }
+
+    def _make_default_dependent_implementations(self):
+        cache.setup_dynamic_attributes(self, cls=__class__)
+
+    @wp.func
+    def _element_measure(F: wp.vec2):
+        return wp.length(F)
+
+    @wp.func
+    def _element_measure(F: wp.vec3):
+        return wp.length(F)
+
+    @wp.func
+    def _element_measure(F: _mat32):
+        Ft = wp.transpose(F)
+        Fcross = wp.cross(Ft[0], Ft[1])
+        return wp.length(Fcross)
+
+    @wp.func
+    def _element_measure(F: wp.mat33):
+        return wp.abs(wp.determinant(F))
+
+    @wp.func
+    def _element_measure(F: wp.mat22):
+        return wp.abs(wp.determinant(F))
+
+    # fp64 overloads
+    @wp.func
+    def _element_measure(F: wp.vec2d):
+        return wp.length(F)
+
+    @wp.func
+    def _element_measure(F: wp.vec3d):
+        return wp.length(F)
+
+    @wp.func
+    def _element_measure(F: _mat32_f64):
+        Ft = wp.transpose(F)
+        Fcross = wp.cross(Ft[0], Ft[1])
+        return wp.length(Fcross)
+
+    @wp.func
+    def _element_measure(F: wp.mat33d):
+        return wp.abs(wp.determinant(F))
+
+    @wp.func
+    def _element_measure(F: wp.mat22d):
+        return wp.abs(wp.determinant(F))
+
+    @wp.func
+    def _element_normal(F: wp.vec2):
+        return wp.normalize(wp.vec2(F[1], -F[0]))
+
+    @wp.func
+    def _element_normal(F: _mat32):
+        Ft = wp.transpose(F)
+        Fcross = wp.cross(Ft[0], Ft[1])
+        return wp.normalize(Fcross)
+
+    # fp64 overloads
+    @wp.func
+    def _element_normal(F: wp.vec2d):
+        return wp.normalize(wp.vec2d(F[1], -F[0]))
+
+    @wp.func
+    def _element_normal(F: _mat32_f64):
+        Ft = wp.transpose(F)
+        Fcross = wp.cross(Ft[0], Ft[1])
+        return wp.normalize(Fcross)
+
+    def _make_cell_measure(self):
+        REF_MEASURE = wp.constant(self.scalar_type(self.reference_cell().prototype.measure()))
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_measure(args: self.CellArg, s: SampleType):
+            F = self.cell_deformation_gradient(args, s)
+            return Geometry._element_measure(F) * REF_MEASURE
+
+        return cell_measure
+
+    def _make_cell_normal(self):
+        cell_dim = self.reference_cell().prototype.dimension
+        geo_dim = self.dimension
+        normal_vec = wp.types.vector(length=geo_dim, dtype=self.scalar_type)
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def zero_normal(args: self.CellArg, s: SampleType):
+            return normal_vec(self.scalar_type(0.0))
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_hyperplane_normal(args: self.CellArg, s: SampleType):
+            F = self.cell_deformation_gradient(args, s)
+            return Geometry._element_normal(F)
+
+        if cell_dim == geo_dim:
+            return zero_normal
+        if cell_dim == geo_dim - 1:
+            return cell_hyperplane_normal
+
+        return None
+
+    def _make_cell_inverse_deformation_gradient(self):
+        cell_dim = self.reference_cell().prototype.dimension
+        geo_dim = self.dimension
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_inverse_deformation_gradient(cell_arg: self.CellArg, s: SampleType):
+            return wp.inverse(self.cell_deformation_gradient(cell_arg, s))
+
+        @cache.dynamic_func(suffix=self.name)
+        def cell_pseudoinverse_deformation_gradient(cell_arg: self.CellArg, s: SampleType):
+            F = self.cell_deformation_gradient(cell_arg, s)
+            Ft = wp.transpose(F)
+            return wp.inverse(Ft * F) * Ft
+
+        return cell_inverse_deformation_gradient if cell_dim == geo_dim else cell_pseudoinverse_deformation_gradient
+
+    def _make_side_inverse_deformation_gradient(self):
+        side_dim = self.reference_side().prototype.dimension
+        geo_dim = self.dimension
+        SampleType = self.sample_type
+
+        if side_dim == geo_dim:
+
+            @cache.dynamic_func(suffix=self.name)
+            def side_inverse_deformation_gradient(side_arg: self.SideArg, s: SampleType):
+                return wp.inverse(self.side_deformation_gradient(side_arg, s))
+
+            return side_inverse_deformation_gradient
+
+        if side_dim == 1:
+
+            @cache.dynamic_func(suffix=self.name)
+            def edge_pseudoinverse_deformation_gradient(side_arg: self.SideArg, s: SampleType):
+                F = self.side_deformation_gradient(side_arg, s)
+                return wp.matrix_from_rows(F / wp.dot(F, F))
+
+            return edge_pseudoinverse_deformation_gradient
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_pseudoinverse_deformation_gradient(side_arg: self.SideArg, s: SampleType):
+            F = self.side_deformation_gradient(side_arg, s)
+            Ft = wp.transpose(F)
+            return wp.inverse(Ft * F) * Ft
+
+        return side_pseudoinverse_deformation_gradient
+
+    def _make_side_measure(self):
+        REF_MEASURE = wp.constant(self.scalar_type(self.reference_side().prototype.measure()))
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_measure(args: self.SideArg, s: SampleType):
+            F = self.side_deformation_gradient(args, s)
+            return Geometry._element_measure(F) * REF_MEASURE
+
+        return side_measure
+
+    def _make_side_measure_ratio(self):
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_measure_ratio(args: self.SideArg, s: SampleType):
+            inner = self.side_inner_cell_index(args, s.element_index)
+            outer = self.side_outer_cell_index(args, s.element_index)
+            inner_coords = self.side_inner_cell_coords(args, s.element_index, s.element_coords)
+            outer_coords = self.side_outer_cell_coords(args, s.element_index, s.element_coords)
+            cell_arg = self.side_to_cell_arg(args)
+            return self.side_measure(args, s) / wp.min(
+                self.cell_measure(cell_arg, make_free_sample(inner, inner_coords)),
+                self.cell_measure(cell_arg, make_free_sample(outer, outer_coords)),
+            )
+
+        return side_measure_ratio
+
+    def _make_side_normal(self):
+        side_dim = self.reference_side().prototype.dimension
+        geo_dim = self.dimension
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def hyperplane_normal(args: self.SideArg, s: SampleType):
+            F = self.side_deformation_gradient(args, s)
+            return Geometry._element_normal(F)
+
+        if side_dim == geo_dim - 1:
+            return hyperplane_normal
+
+        return None
+
+    def _make_side_inner_inverse_deformation_gradient(self):
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_inner_inverse_deformation_gradient(args: self.SideArg, s: SampleType):
+            cell_index = self.side_inner_cell_index(args, s.element_index)
+            cell_coords = self.side_inner_cell_coords(args, s.element_index, s.element_coords)
+            cell_arg = self.side_to_cell_arg(args)
+            return self.cell_inverse_deformation_gradient(cell_arg, make_free_sample(cell_index, cell_coords))
+
+        return side_inner_inverse_deformation_gradient
+
+    def _make_side_outer_inverse_deformation_gradient(self):
+        SampleType = self.sample_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def side_outer_inverse_deformation_gradient(args: self.SideArg, s: SampleType):
+            cell_index = self.side_outer_cell_index(args, s.element_index)
+            cell_coords = self.side_outer_cell_coords(args, s.element_index, s.element_coords)
+            cell_arg = self.side_to_cell_arg(args)
+            return self.cell_inverse_deformation_gradient(cell_arg, make_free_sample(cell_index, cell_coords))
+
+        return side_outer_inverse_deformation_gradient
+
+    def _make_element_coordinates(self, element_kind: ElementKind, assume_linear: bool = False):
+        pos_type = cache.cached_vec_type(self.dimension, dtype=self.scalar_type)
+        CoordsType = self.coords_type
+
+        if element_kind == ElementKind.CELL:
+            ref_elt = self.reference_cell().prototype
+            arg_type = self.CellArg
+            elt_pos = self.cell_position
+            elt_inv_grad = self.cell_inverse_deformation_gradient
+        else:
+            ref_elt = self.reference_side().prototype
+            arg_type = self.SideArg
+            elt_pos = self.side_position
+            elt_inv_grad = self.side_inverse_deformation_gradient
+
+        elt_center = CoordsType(ref_elt.center())
+
+        if assume_linear:
+
+            @cache.dynamic_func(suffix=(self.name, element_kind))
+            def element_coordinates_linear(args: arg_type, element_index: ElementIndex, pos: pos_type):
+                coords = elt_center
+
+                s = make_free_sample(element_index, coords)
+                x = elt_pos(args, s)
+                dc = elt_inv_grad(args, s) * (pos - x)
+                coords = coords + ref_elt.coord_delta(dc)
+
+                return coords
+
+            return element_coordinates_linear
+
+        lookup_iterations = _COORD_LOOKUP_ITERATIONS_F64 if self.scalar_type == wp.float64 else _COORD_LOOKUP_ITERATIONS
+        lookup_eps = _COORD_LOOKUP_EPS_F64 if self.scalar_type == wp.float64 else _COORD_LOOKUP_EPS
+        lookup_step = _COORD_LOOKUP_STEP_F64 if self.scalar_type == wp.float64 else _COORD_LOOKUP_STEP
+
+        @cache.dynamic_func(suffix=(self.name, element_kind))
+        def element_coordinates(args: arg_type, element_index: ElementIndex, pos: pos_type):
+            coords = elt_center
+
+            # Newton loop
+            for _k in range(lookup_iterations):
+                s = make_free_sample(element_index, coords)
+                x = elt_pos(args, s)
+                dc = elt_inv_grad(args, s) * (pos - x)
+                if wp.length_sq(dc) < lookup_eps:
+                    break
+                coords = coords + ref_elt.coord_delta(lookup_step * dc)
+
+            return coords
+
+        return element_coordinates
+
+    def _make_cell_coordinates(self, assume_linear: bool = False):
+        return self._make_element_coordinates(element_kind=ElementKind.CELL, assume_linear=assume_linear)
+
+    def _make_side_coordinates(self, assume_linear: bool = False):
+        return self._make_element_coordinates(element_kind=ElementKind.SIDE, assume_linear=assume_linear)
+
+    def _make_element_closest_point(self, element_kind: ElementKind, assume_linear: bool = False):
+        pos_type = cache.cached_vec_type(self.dimension, dtype=self.scalar_type)
+
+        element_coordinates = self._make_element_coordinates(element_kind=element_kind, assume_linear=assume_linear)
+
+        if element_kind == ElementKind.CELL:
+            ref_elt = self.reference_cell().prototype
+            arg_type = self.CellArg
+            elt_pos = self.cell_position
+            elt_def_grad = self.cell_deformation_gradient
+        else:
+            ref_elt = self.reference_side().prototype
+            arg_type = self.SideArg
+            elt_pos = self.side_position
+            elt_def_grad = self.side_deformation_gradient
+
+        lookup_iterations = _COORD_LOOKUP_ITERATIONS_F64 if self.scalar_type == wp.float64 else _COORD_LOOKUP_ITERATIONS
+        lookup_eps = _COORD_LOOKUP_EPS_F64 if self.scalar_type == wp.float64 else _COORD_LOOKUP_EPS
+
+        @cache.dynamic_func(suffix=f"{self.name}{element_kind}{assume_linear}")
+        def cell_closest_point(args: arg_type, cell_index: ElementIndex, pos: pos_type):
+            # First get unconstrained coordinates, may use newton for this
+            coords = element_coordinates(args, cell_index, pos)
+
+            # Now do projected gradient
+            # For interior points should exit at first iteration
+            for _k in range(lookup_iterations):
+                cur_coords = coords
+                s = make_free_sample(cell_index, cur_coords)
+                x = elt_pos(args, s)
+
+                F = elt_def_grad(args, s)
+                F_scale = wp.ddot(F, F)
+
+                dc = (pos - x) @ F  # gradient step
+                coords = ref_elt.project(cur_coords + ref_elt.coord_delta(dc / F_scale))
+
+                if wp.length_sq(coords - cur_coords) < lookup_eps:
+                    break
+
+            return cur_coords, wp.length_sq(pos - x)
+
+        return cell_closest_point
+
+    def _make_cell_closest_point(self, assume_linear: bool = False):
+        return self._make_element_closest_point(element_kind=ElementKind.CELL, assume_linear=assume_linear)
+
+    def _make_side_closest_point(self, assume_linear: bool = False):
+        return self._make_element_closest_point(element_kind=ElementKind.SIDE, assume_linear=assume_linear)
+
+    def make_filtered_cell_lookup(self, filter_func: wp.Function = None):
+        """Create a filtered cell lookup function.
+
+        Args:
+            filter_func: Optional device predicate to filter candidate cells.
+        """
+        suffix = f"{self.name}{filter_func.key if filter_func is not None else ''}"
+        pos_type = cache.cached_vec_type(self.dimension, dtype=self.scalar_type)
+        CoordsType = self.coords_type
+        scalar = self.scalar_type
+
+        @cache.dynamic_func(suffix=(suffix, "root"))
+        def cell_lookup_root(
+            args: self.CellArg,
+            pos: pos_type,
+            max_dist: float,
+            filter_data: Any,
+            filter_target: Any,
+            root: int,
+        ):
+            closest_cell = int(NULL_ELEMENT_INDEX)
+            closest_coords = CoordsType(scalar(OUTSIDE))
+
+            bvh_id = self.cell_bvh_id(args)
+            if bvh_id != _NULL_BVH_ID:
+                pad = wp.max(max_dist, 1.0) * _BVH_MIN_PADDING
+
+                # query with increasing bbox size until we find an element
+                # or reach the max distance bound
+                while closest_cell == NULL_ELEMENT_INDEX:
+                    query = wp.bvh_query_aabb(bvh_id, _bvh_vec(pos) - wp.vec3(pad), _bvh_vec(pos) + wp.vec3(pad), root)
+                    cell_index = int(0)
+                    closest_dist = scalar(pad * pad)
+
+                    while wp.bvh_query_next(query, cell_index):
+                        if wp.static(filter_func is not None):
+                            if filter_func(filter_data, cell_index) != filter_target:
+                                continue
+
+                        coords, dist = self.cell_closest_point(args, cell_index, pos)
+                        if dist <= closest_dist:
+                            closest_dist = dist
+                            closest_cell = cell_index
+                            closest_coords = coords
+
+                    if pad >= _BVH_MAX_PADDING:
+                        break
+                    pad = wp.min(4.0 * pad, _BVH_MAX_PADDING)
+
+            return make_free_sample(closest_cell, closest_coords)
+
+        if self.environment_count() <= 1:
+
+            @cache.dynamic_func(suffix=suffix, allow_overloads=True)
+            def cell_lookup(args: self.CellArg, pos: pos_type, max_dist: float, filter_data: Any, filter_target: Any):
+                return cell_lookup_root(args, pos, max_dist, filter_data, filter_target, -1)
+
+        @cache.dynamic_func(suffix=suffix, allow_overloads=True)
+        def cell_lookup(
+            args: self.CellArg,
+            pos: pos_type,
+            max_dist: float,
+            filter_data: Any,
+            filter_target: Any,
+            env_index: int,
+        ):
+            bvh_id = self.cell_bvh_id(args)
+            root = int(-1)
+            if bvh_id != _NULL_BVH_ID:
+                root = wp.bvh_get_group_root(bvh_id, env_index)
+                if wp.static(self.environment_count() > 1):
+                    if root == -1:
+                        return make_free_sample(int(NULL_ELEMENT_INDEX), CoordsType(scalar(OUTSIDE)))
+
+            return cell_lookup_root(args, pos, max_dist, filter_data, filter_target, root)
+
+        return cell_lookup
+
+    @cached_property
+    def cell_lookup(self) -> wp.Function:
+        """Device function for looking up the closest cell to a position."""
+        unfiltered_cell_lookup = self.make_filtered_cell_lookup(filter_func=None)
+
+        # overloads
+        null_filter_data = 0
+        null_filter_target = 0
+
+        pos_type = cache.cached_vec_type(self.dimension, dtype=self.scalar_type)
+        SampleType = self.sample_type
+        lookup_suffix = (self.name, self.environment_count() > 1)
+
+        if self.environment_count() <= 1:
+
+            @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+            def cell_lookup(args: self.CellArg, pos: pos_type, max_dist: float):
+                return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target)
+
+        @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+        def cell_lookup(args: self.CellArg, pos: pos_type, max_dist: float, env_index: int):
+            return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target, env_index)
+
+        @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+        def cell_lookup(args: self.CellArg, pos: pos_type, guess: SampleType):
+            guess_pos = self.cell_position(args, guess)
+            max_dist = wp.float32(wp.length(guess_pos - pos))
+            if wp.static(self.environment_count() <= 1):
+                return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target)
+
+            env_index = self.cell_environment_index(args, guess.element_index)
+            return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target, env_index)
+
+        if self.environment_count() <= 1:
+
+            @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+            def cell_lookup(args: self.CellArg, pos: pos_type):
+                max_dist = 0.0
+                return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target)
+
+        @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+        def cell_lookup(args: self.CellArg, pos: pos_type, env_index: int):
+            max_dist = 0.0
+            return unfiltered_cell_lookup(args, pos, max_dist, null_filter_data, null_filter_target, env_index)
+
+        # array filtering variants
+        filtered_cell_lookup = self.make_filtered_cell_lookup(filter_func=_array_load)
+        pos_type = cache.cached_vec_type(self.dimension, dtype=self.scalar_type)
+
+        if self.environment_count() <= 1:
+
+            @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+            def cell_lookup(
+                args: self.CellArg,
+                pos: pos_type,
+                max_dist: float,
+                filter_array: wp.array(dtype=Any),
+                filter_target: Any,
+            ):
+                return filtered_cell_lookup(args, pos, max_dist, filter_array, filter_target)
+
+        @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+        def cell_lookup(
+            args: self.CellArg,
+            pos: pos_type,
+            max_dist: float,
+            filter_array: wp.array(dtype=Any),
+            filter_target: Any,
+            env_index: int,
+        ):
+            return filtered_cell_lookup(args, pos, max_dist, filter_array, filter_target, env_index)
+
+        if self.environment_count() <= 1:
+
+            @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+            def cell_lookup(args: self.CellArg, pos: pos_type, filter_array: wp.array(dtype=Any), filter_target: Any):
+                max_dist = 0.0
+                return filtered_cell_lookup(args, pos, max_dist, filter_array, filter_target)
+
+        @cache.dynamic_func(suffix=lookup_suffix, allow_overloads=True)
+        def cell_lookup(
+            args: self.CellArg,
+            pos: pos_type,
+            filter_array: wp.array(dtype=Any),
+            filter_target: Any,
+            env_index: int,
+        ):
+            max_dist = 0.0
+            return filtered_cell_lookup(args, pos, max_dist, filter_array, filter_target, env_index)
+
+        return cell_lookup
+
+    def _make_compute_cell_bounds(self):
+        if not hasattr(self, "cell_bounds"):
+            return None
+
+        @cache.dynamic_kernel(suffix=self.name)
+        def compute_cell_bounds(
+            args: self.CellArg,
+            lowers: wp.array(dtype=wp.vec3),
+            uppers: wp.array(dtype=wp.vec3),
+        ):
+            i = wp.tid()
+            lo, up = self.cell_bounds(args, i)
+            lowers[i] = _bvh_vec(lo)
+            uppers[i] = _bvh_vec(up)
+
+        return compute_cell_bounds
+
+    def supports_cell_lookup(self, device) -> bool:
+        """Return whether cell lookups are supported on the given device."""
+        return self.bvh_id(device) != _NULL_BVH_ID
+
+    def update_bvh(self, device=None):
+        """Refit the geometry's BVH if it exists on ``device``, or build it from scratch otherwise.
+
+        Refitting the BVH is cheaper than rebuilding it from scratch, and is generally preferred
+        when the geometry positions are modified without significant changes to the topology.
+
+        See also: :meth:`.Geometry.build_bvh`.
+        """
+
+        if self._bvhs is None:
+            return self.build_bvh(device)
+
+        device = wp.get_device(device)
+        bvh = self._bvhs.get(device.ordinal)
+        if bvh is None:
+            return self.build_bvh(device)
+
+        wp.launch(
+            self.compute_cell_bounds,
+            dim=self.cell_count(),
+            device=device,
+            inputs=[self.cell_arg_value(device=device)],
+            outputs=[
+                bvh.lowers,
+                bvh.uppers,
+            ],
+        )
+
+        bvh.refit()
+
+    def build_bvh(self, device=None):
+        """Rebuild the geometry's Bounding Volume Hierarchy (BVH) for ``device`` from scratch.
+
+        Many geometries rely on a BVH for the :func:`lookup` and :func:`partition_lookup` operators to be functional.
+
+        If building a BVH is not supported for this geometry, a :class:`TypeError` is raised.
+
+        .. note::
+
+            Warp's BVH API operates in fp32. For fp64 geometries, positions are truncated
+            to fp32 for the spatial query; the subsequent Newton iteration then refines
+            coordinates at full fp64 precision. This may cause lookup failures for features
+            separated by less than ~1e-7 in world space.
+
+        See also: :meth:`.Geometry.update_bvh`.
+        """
+
+        if self.compute_cell_bounds is None:
+            raise TypeError("Building a BVH is not supported for this geometry")
+
+        device = wp.get_device(device)
+
+        lowers = wp.array(shape=self.cell_count(), dtype=wp.vec3, device=device)
+        uppers = wp.array(shape=self.cell_count(), dtype=wp.vec3, device=device)
+
+        wp.launch(
+            self.compute_cell_bounds,
+            dim=self.cell_count(),
+            device=device,
+            inputs=[self.cell_arg_value(device=device)],
+            outputs=[
+                lowers,
+                uppers,
+            ],
+        )
+
+        if self._bvhs is None:
+            self._bvhs = {}
+
+        self._bvhs[device.ordinal] = wp.Bvh(lowers, uppers, groups=self.cell_bvh_groups(device))
+
+        Geometry.cell_arg_value.invalidate(self, device)
+        Geometry.side_arg_value.invalidate(self, device)
+
+    def cell_bvh_groups(self, device):
+        """Return optional per-cell BVH group indices on ``device``."""
+        device = wp.get_device(device)
+
+        if self.cell_env is not None:
+            return self.cell_env.to(device)
+
+        if self.environment_count() <= 1:
+            return None
+
+        cell_bvh_groups = getattr(self, "_cell_bvh_groups", None)
+        if cell_bvh_groups is None:
+            cell_bvh_groups = {}
+            self._cell_bvh_groups = cell_bvh_groups
+
+        groups = cell_bvh_groups.get(device.ordinal)
+        if groups is None:
+            groups = wp.empty(shape=self.cell_count(), dtype=wp.int32, device=device)
+            wp.launch(
+                self.compute_cell_bvh_groups,
+                dim=self.cell_count(),
+                device=device,
+                inputs=[self.cell_arg_value(device=device)],
+                outputs=[groups],
+            )
+            cell_bvh_groups[device.ordinal] = groups
+
+        return groups
+
+    @cached_property
+    def compute_cell_bvh_groups(self):
+        @cache.dynamic_kernel(suffix=self.name)
+        def compute_cell_bvh_groups(
+            args: self.CellArg,
+            groups: wp.array(dtype=wp.int32),
+        ):
+            cell_index = wp.tid()
+            groups[cell_index] = self.cell_environment_index(args, cell_index)
+
+        return compute_cell_bvh_groups
+
+    def cell_env_arg_value(self, device):
+        """Return per-cell environment indices for geometry argument structs."""
+        if self.cell_env is None:
+            return wp.empty(shape=(0,), dtype=wp.int32, device=device)
+
+        return self.cell_env.to(device)
+
+    def bvh_id(self, device):
+        """Return the BVH identifier for the given device, or ``0`` if unavailable."""
+        if self._bvhs is None:
+            return _NULL_BVH_ID
+
+        bvh = self._bvhs.get(wp.get_device(device).ordinal)
+        if bvh is None:
+            return _NULL_BVH_ID
+        return bvh.id
+
+
+@wp.func
+def _bvh_vec(v: wp.vec3):
+    return v
+
+
+@wp.func
+def _bvh_vec(v: wp.vec2):
+    return wp.vec3(v[0], v[1], 0.0)
+
+
+@wp.func
+def _bvh_vec(v: wp.vec3d):
+    return wp.vec3(wp.float32(v[0]), wp.float32(v[1]), wp.float32(v[2]))
+
+
+@wp.func
+def _bvh_vec(v: wp.vec2d):
+    return wp.vec3(wp.float32(v[0]), wp.float32(v[1]), 0.0)
+
+
+@wp.func
+def _array_load(arr: wp.array(dtype=Any), idx: int):
+    return arr[idx]
+
+
+def _initialize_cell_environment_indices(
+    cell_env: wp.array | None,
+    env_count: int | None,
+    cell_count: int,
+    device,
+):
+    device = wp.get_device(device)
+
+    if cell_env is None:
+        if env_count not in (None, 1):
+            raise ValueError(
+                "Environment count can only be greater than one when cell environment indices are provided"
+            )
+        return None, 1
+
+    if env_count is None:
+        raise ValueError("Environment count must be provided when cell environment indices are provided")
+    if env_count < 1:
+        raise ValueError("Environment count must be at least one")
+    if not is_array(cell_env):
+        raise ValueError("Cell environment indices must be a Warp array")
+    if cell_env.ndim != 1 or cell_env.shape[0] != cell_count:
+        raise ValueError("Cell environment indices must have one entry per cell")
+    if cell_env.dtype != wp.int32:
+        raise ValueError("Cell environment indices must have dtype wp.int32")
+    if not cell_env.is_contiguous:
+        raise ValueError("Cell environment indices must be contiguous")
+    if cell_env.device != device:
+        raise RuntimeError("Cell environment indices must live on the same device as the geometry")
+
+    return cell_env, env_count

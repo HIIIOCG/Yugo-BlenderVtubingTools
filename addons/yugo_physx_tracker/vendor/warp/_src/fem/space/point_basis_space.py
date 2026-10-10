@@ -1,0 +1,471 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any, ClassVar
+
+import warp as wp
+from warp._src.fem import cache
+from warp._src.fem.operator import integrand
+from warp._src.fem.quadrature import Quadrature
+from warp._src.fem.types import (
+    NULL_ELEMENT_INDEX,
+    ElementIndex,
+    ElementKind,
+    QuadraturePointIndex,
+    make_free_sample,
+)
+from warp._src.types import type_repr, type_to_warp
+
+from .basis_space import BasisSpace
+from .shape import ShapeFunction
+from .topology import SpaceTopology
+
+
+class UnstructuredPointTopology(SpaceTopology):
+    """Topology for unstructured points defined from quadrature formula. See :class:`PointBasisSpace`."""
+
+    _dynamic_attribute_constructors: ClassVar = {
+        "TopologyArg": lambda obj: obj._make_topology_arg(),
+        "domain_element_index": lambda obj: obj._make_domain_element_index(),
+        "element_node_index": lambda obj: obj._make_element_node_index(),
+        "element_node_count": lambda obj: obj._make_element_node_count(),
+        "side_neighbor_node_counts": lambda obj: obj.make_generic_side_neighbor_node_counts(),
+    }
+
+    def __init__(
+        self,
+        quadrature: Quadrature,
+        max_nodes_per_element: int = -1,
+        use_evaluation_point_index: bool = False,
+    ):
+        if max_nodes_per_element < 0:
+            max_nodes_per_element = quadrature.max_points_per_element()
+            if max_nodes_per_element is None:
+                raise ValueError("Quadrature must define a maximum number of points per element")
+
+        geo_partition = quadrature.domain.geometry_partition
+        if (
+            quadrature.domain.element_count() != geo_partition.cell_count()
+            or quadrature.domain.element_kind != ElementKind.CELL
+        ):
+            raise ValueError(
+                "Point topology may only be defined on quadrature domains that span the whole geometry partition"
+            )
+
+        self._quadrature = quadrature
+        self._geo_partition = geo_partition
+        self._use_evaluation_point_index = use_evaluation_point_index
+
+        super().__init__(quadrature.domain.geometry, max_nodes_per_element=max_nodes_per_element)
+
+        cache.setup_dynamic_attributes(self, cls=__class__)
+
+    def node_count(self):
+        if self._use_evaluation_point_index:
+            return self._quadrature.evaluation_point_count()
+        else:
+            return self._quadrature.total_point_count()
+
+    def _make_topology_arg(self):
+        @cache.dynamic_struct(suffix=self.name)
+        class TopologyArg:
+            max_nodes_per_element: int
+            quadrature_arg: self._quadrature.Arg
+            element_index_arg: self._geo_partition.CellArg
+
+        return TopologyArg
+
+    def fill_topo_arg(self, arg: "UnstructuredPointTopology.TopologyArg", device):
+        arg.max_nodes_per_element = self.MAX_NODES_PER_ELEMENT
+        self._quadrature.fill_arg(arg.quadrature_arg, device)
+        self._quadrature.domain.fill_element_index_arg(arg.element_index_arg, device)
+
+    @property
+    def name(self):
+        return f"PointTopology_{self._quadrature.name}{self._use_evaluation_point_index}"
+
+    def _make_domain_element_index(self):
+        @cache.dynamic_func(suffix=self.name)
+        def domain_element_index(element_index_arg: self._geo_partition.CellArg, element_index: int):
+            return self._geo_partition.partition_cell_index(element_index_arg, element_index)
+
+        return domain_element_index
+
+    def _make_element_node_index(self):
+        @cache.dynamic_func(suffix=self.name)
+        def element_node_index(
+            elt_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            domain_element_index = self.domain_element_index(topo_arg.element_index_arg, element_index)
+            if wp.static(self._use_evaluation_point_index):
+                return self._quadrature.point_evaluation_index(
+                    elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+                )
+            else:
+                return self._quadrature.point_index(
+                    elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+                )
+
+        return element_node_index
+
+    def _make_element_node_count(self):
+        @cache.dynamic_func(suffix=self.name)
+        def element_node_count(
+            elt_arg: self.geometry.CellArg,
+            topo_arg: self.TopologyArg,
+            element_index: ElementIndex,
+        ):
+            domain_element_index = self.domain_element_index(topo_arg.element_index_arg, element_index)
+            if domain_element_index == NULL_ELEMENT_INDEX:
+                return 0
+            return wp.min(
+                topo_arg.max_nodes_per_element,
+                self._quadrature.point_count(elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index),
+            )
+
+        return element_node_count
+
+
+class PointBasisSpace(BasisSpace):
+    """Unstructured basis space with radial basis kernel functions.
+
+    This basis space places nodes at quadrature point locations and uses
+    radial kernel functions (defaulting to Dirac delta) to define the basis.
+    Useful for particle-in-cell (PIC) methods and meshless discretizations.
+
+    The kernel function receives the squared distance from the sample point
+    to each node center, allowing for smooth interpolation kernels like
+    Gaussian or spline-based functions.
+
+    See Also:
+        :class:`BasisSpace`, :class:`PicQuadrature`
+    """
+
+    _dynamic_attribute_constructors: ClassVar = {
+        "ValueStruct": lambda obj: obj._make_value_struct(),
+        "squared_distance": lambda obj: obj._make_squared_distance(),
+        "squared_distance_gradient": lambda obj: obj._make_squared_distance_gradient(),
+    }
+
+    def __init__(
+        self,
+        quadrature: Quadrature,
+        kernel_func: wp.Function | None = None,
+        kernel_grad_func: wp.Function | None = None,
+        kernel_values: dict[str, Any] | None = None,
+        distance_space: str = "reference",
+        max_nodes_per_element: int = -1,
+        use_evaluation_point_index: bool = False,
+    ):
+        """Create a point basis space with radial basis kernels.
+
+        By default uses the Dirac delta function as the kernel.
+
+        Args:
+            quadrature: Quadrature formula defining the node locations and quadrature weights
+            kernel_func: Kernel function to be used for the basis space. First two arguments must be squared distance to the kernel center and the quadrature point index,
+              then optionally additional kernel values. Default to Dirac delta function.
+            kernel_grad_func: Gradient of the kernel function. Must take same arguments as `kernel_func`. Defaults to zero gradient.
+            kernel_values: Dictionary of additional values to be passed to the kernel function
+            distance_space: Space in which to compute the distance between the sample and the kernel center point. Can be "reference" or "world". Defaults to "reference".
+            max_nodes_per_element: Maximum number of point nodes per element to consider. If not provided, get from the quadrature.
+            use_evaluation_point_index: Whether to build the node topology from the quadrature evaluation points rather than unique points.
+              Evaluation points are unique to each element, while quadrature points can be shared among elements. As such, using evaluation points
+              will always lead to a discontinuous basis space. Moreover, for PicQuadrature, evaluation points are sorted according to element indices.
+        """
+
+        self._quadrature = quadrature
+        self._distance_space = distance_space
+
+        self.ORDER = 0
+        self._geo_partition = quadrature.domain.geometry_partition
+
+        if kernel_func is None:
+            self.kernel_func = self._dirac_radial_kernel
+            self.kernel_grad_func = None
+            kernel_values = {"squared_radius": 1.0e-6}
+        else:
+            self.kernel_func = kernel_func
+            self.kernel_grad_func = kernel_grad_func
+
+        self._topology = UnstructuredPointTopology(
+            quadrature,
+            max_nodes_per_element=max_nodes_per_element,
+            use_evaluation_point_index=use_evaluation_point_index,
+        )
+
+        kernel_key = self.kernel_func.native_func
+        grad_key = self.kernel_grad_func.native_func if self.kernel_grad_func is not None else "None"
+        self._name = f"{self._topology.name}_{kernel_key}_{grad_key}_{self._distance_space}"
+
+        cache.setup_dynamic_attributes(self)
+        self._kernel_arg = self.ValueStruct()
+        self.kernel_values = kernel_values or {}
+
+        super().__init__(self._topology)
+
+    @property
+    def kernel_values(self) -> dict[str, Any]:
+        """Dictionary of additional values to be passed to the kernel function"""
+        return self._kernel_values
+
+    @kernel_values.setter
+    def kernel_values(self, v: dict[str, Any]):
+        self._kernel_values = v
+        cache.populate_argument_struct(self._kernel_arg, v, self.kernel_func.func.__name__)
+
+    @property
+    def name(self):
+        """Unique name of the basis space."""
+        return self._name
+
+    @property
+    def value(self) -> ShapeFunction.Value:
+        """Value type of the basis space."""
+        return ShapeFunction.Value.Scalar
+
+    def _make_value_struct(self):
+        argspec = integrand(self.kernel_func.func).argspec
+        arg_types = argspec.annotations.copy()
+        first_arg_type = None
+        second_arg_type = None
+        scalar = self.geometry.scalar_type
+        expected_first_types = " or ".join(dict.fromkeys((type_repr(wp.float32), type_repr(scalar))))
+
+        try:
+            first_arg_type = type_to_warp(arg_types.pop(argspec.args[0]))
+            second_arg_type = type_to_warp(arg_types.pop(argspec.args[1]))
+
+            if (first_arg_type != wp.float32 and first_arg_type != scalar) or second_arg_type != wp.int32:
+                raise TypeError("Invalid radial kernel argument types")
+        except Exception as err:
+            actual_first_type = type_repr(first_arg_type) if first_arg_type is not None else "unavailable"
+            actual_second_type = type_repr(second_arg_type) if second_arg_type is not None else "unavailable"
+            raise TypeError(
+                f"Radial kernel '{self.kernel_func.func.__name__}' argument types must be "
+                f"({expected_first_types}, {type_repr(wp.int32)}), "
+                f"got ({actual_first_type}, {actual_second_type})"
+            ) from err
+
+        return cache.get_argument_struct(arg_types)
+
+    @property
+    def BasisArg(self) -> "PointBasisSpace.BasisArg":
+        """Argument structure for basis-related device functions."""
+        return self.ValueStruct
+
+    def fill_basis_arg(self, arg: "PointBasisSpace.BasisArg", device):
+        """Fill basis arguments for device functions."""
+        arg.assign(self._kernel_arg)
+
+    def basis_arg_value(self, device) -> "PointBasisSpace.BasisArg":
+        """Return the basis argument structure for device functions."""
+        return self._kernel_arg
+
+    def make_node_coords_in_element(self):
+        """Create a device function returning node coordinates within an element."""
+
+        @cache.dynamic_func(suffix=self.name)
+        def node_coords_in_element(
+            elt_arg: self._quadrature.domain.ElementArg,
+            topo_arg: self.topology.TopologyArg,
+            basis_arg: self.BasisArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            domain_element_index = self.topology.domain_element_index(topo_arg.element_index_arg, element_index)
+            return self._quadrature.point_coords(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+
+        return node_coords_in_element
+
+    def make_node_quadrature_weight(self):
+        """Create a device function returning node quadrature weights."""
+
+        @cache.dynamic_func(
+            suffix=self.name,
+        )
+        def node_quadrature_weight(
+            elt_arg: self._quadrature.domain.ElementArg,
+            topo_arg: self.topology.TopologyArg,
+            basis_arg: self.BasisArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            domain_element_index = self.topology.domain_element_index(topo_arg.element_index_arg, element_index)
+            return self._quadrature.point_weight(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+
+        return node_quadrature_weight
+
+    def _make_squared_distance(self):
+        if self._distance_space == "reference":
+            ref_delta = self._quadrature.domain.reference_element().prototype.ref_delta
+
+            @cache.dynamic_func(suffix=self.name)
+            def squared_distance_reference(
+                elt_arg: self._quadrature.domain.ElementArg,
+                element_index: ElementIndex,
+                coords: self.geometry.coords_type,
+                point_coords: self.geometry.coords_type,
+            ):
+                return wp.length_sq(ref_delta(coords - point_coords))
+
+            return squared_distance_reference
+
+        @cache.dynamic_func(suffix=self.name)
+        def squared_distance_world(
+            elt_arg: self._quadrature.domain.ElementArg,
+            element_index: ElementIndex,
+            coords: Any,
+            point_coords: Any,
+        ):
+            sample_x = self._quadrature.domain.element_position(elt_arg, make_free_sample(element_index, coords))
+            point_x = self._quadrature.domain.element_position(elt_arg, make_free_sample(element_index, point_coords))
+            return wp.length_sq(sample_x - point_x)
+
+        return squared_distance_world
+
+    def _make_squared_distance_gradient(self):
+        if self._distance_space == "reference":
+            ref_delta = self._quadrature.domain.reference_element().prototype.ref_delta
+
+            @cache.dynamic_func(suffix=self.name)
+            def squared_distance_gradient_reference(
+                elt_arg: self._quadrature.domain.ElementArg,
+                element_index: ElementIndex,
+                coords: Any,
+                point_coords: Any,
+            ):
+                return 2.0 * ref_delta(coords - point_coords)
+
+            return squared_distance_gradient_reference
+
+        @cache.dynamic_func(suffix=self.name)
+        def squared_distance_gradient_world(
+            elt_arg: self._quadrature.domain.ElementArg,
+            element_index: ElementIndex,
+            coords: Any,
+            point_coords: Any,
+        ):
+            sample_x = self._quadrature.domain.element_position(elt_arg, make_free_sample(element_index, coords))
+            sample_F = self._quadrature.domain.element_deformation_gradient(
+                elt_arg, make_free_sample(element_index, coords)
+            )
+            point_x = self._quadrature.domain.element_position(elt_arg, make_free_sample(element_index, point_coords))
+            return 2.0 * (sample_x - point_x) @ sample_F
+
+        return squared_distance_gradient_world
+
+    def make_element_inner_weight(self):
+        """Create a device function returning inner element shape weights."""
+
+        @cache.dynamic_func(
+            suffix=self.name,
+            code_transformers=[cache.ExpandStarredArgumentStruct({"basis_arg": self.ValueStruct})],
+        )
+        def element_inner_weight(
+            elt_arg: self._quadrature.domain.ElementArg,
+            topo_arg: self.topology.TopologyArg,
+            basis_arg: self.BasisArg,
+            element_index: ElementIndex,
+            coords: self.geometry.coords_type,
+            node_index_in_elt: int,
+            qp_index: QuadraturePointIndex,
+        ):
+            domain_element_index = self.topology.domain_element_index(topo_arg.element_index_arg, element_index)
+            point_index = self._quadrature.point_index(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+            point_coord = self._quadrature.point_coords(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+            squared_dist = self.squared_distance(elt_arg, element_index, coords, point_coord)
+            return self.kernel_func(squared_dist, point_index, *basis_arg)
+
+        return element_inner_weight
+
+    def make_element_inner_weight_gradient(self):
+        """Create a device function returning gradients of inner element weights."""
+        if wp.static(self.kernel_grad_func is None):
+            gradient_vec = cache.cached_vec_type(length=self.geometry.cell_dimension, dtype=self.geometry.scalar_type)
+
+            @cache.dynamic_func(suffix=self.name)
+            def element_inner_weight_null_gradient(
+                elt_arg: self._quadrature.domain.ElementArg,
+                topo_arg: self.topology.TopologyArg,
+                basis_arg: self.BasisArg,
+                element_index: ElementIndex,
+                coords: self.geometry.coords_type,
+                node_index_in_elt: int,
+                qp_index: QuadraturePointIndex,
+            ):
+                return gradient_vec(self.geometry.scalar_type(0.0))
+
+            return element_inner_weight_null_gradient
+
+        @cache.dynamic_func(
+            suffix=self.name,
+            code_transformers=[cache.ExpandStarredArgumentStruct({"basis_arg": self.ValueStruct})],
+        )
+        def element_inner_weight_gradient(
+            elt_arg: self._quadrature.domain.ElementArg,
+            topo_arg: self.topology.TopologyArg,
+            basis_arg: self.BasisArg,
+            element_index: ElementIndex,
+            coords: self.geometry.coords_type,
+            node_index_in_elt: int,
+            qp_index: QuadraturePointIndex,
+        ):
+            domain_element_index = self.topology.domain_element_index(topo_arg.element_index_arg, element_index)
+            point_index = self._quadrature.point_index(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+            point_coord = self._quadrature.point_coords(
+                elt_arg, topo_arg.quadrature_arg, domain_element_index, element_index, node_index_in_elt
+            )
+
+            squared_dist = self.squared_distance(elt_arg, element_index, coords, point_coord)
+            kernel_grad = self.kernel_grad_func(squared_dist, point_index, *basis_arg)
+            squared_dist_gradient = self.squared_distance_gradient(elt_arg, element_index, coords, point_coord)
+
+            return squared_dist_gradient * kernel_grad
+
+        return element_inner_weight_gradient
+
+    def make_element_outer_weight(self):
+        """Create a device function returning outer element shape weights."""
+        return self.make_element_inner_weight()
+
+    def make_element_outer_weight_gradient(self):
+        """Create a device function returning gradients of outer element weights."""
+        return self.make_element_inner_weight_gradient()
+
+    def make_trace_node_quadrature_weight(self, trace_basis):
+        """Create a device function returning trace node quadrature weights."""
+        scalar = self.geometry.scalar_type
+
+        @cache.dynamic_func(suffix=self.name)
+        def trace_node_quadrature_weight(
+            elt_arg: trace_basis.geometry.SideArg,
+            topo_arg: self.topology.TopologyArg,
+            basis_arg: trace_basis.BasisArg,
+            element_index: ElementIndex,
+            node_index_in_elt: int,
+        ):
+            return scalar(0.0)
+
+        return trace_node_quadrature_weight
+
+    @wp.func
+    def _dirac_radial_kernel(
+        squared_distance: float,
+        qp_index: int,
+        squared_radius: float,
+    ):
+        return wp.where(squared_distance < squared_radius, 1.0, 0.0)

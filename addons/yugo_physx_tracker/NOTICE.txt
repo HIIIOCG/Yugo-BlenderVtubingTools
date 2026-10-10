@@ -1,0 +1,58 @@
+Yugo PhysX Tracker addon source: GPL-3.0-or-later.
+The addon contains its own node, binding, display and process-client modules.
+It does not alter or import the physics runtime of other Yugo physics addons.
+
+Native runtime dependencies
+---------------------------
+vendor/ contains official Windows wheels extracted without changing their
+native libraries. The exact distribution metadata and original license files
+are retained in vendor/*.dist-info and each package's license directory.
+The addon GPL declaration does not relicense these third-party distributions.
+
+OVPhysX supplies the standalone PhysX C API and native simulation runtime.
+OVStage and OpenUSD supply the scene population and USD authoring interfaces.
+Warp supplies native CPU/CUDA array interoperability. ONNX Runtime supplies
+the learned actor inference engine. NumPy is bundled for the isolated worker.
+No Isaac Sim, Isaac Lab, Omniverse Kit, PyTorch or training optimizer is bundled.
+
+The bundled OVPhysX 0.6.3 binary distribution is governed by NVIDIA Software
+License Agreement and NVIDIA Omniverse terms, as explicitly stated in
+vendor/ovphysx-0.6.3.dist-info/licenses/LICENSE.txt. The complete third-party
+license collection is retained at that directory's ovphysx-LICENSES.zip.
+OVStage 0.2.0.377349 retains its NVIDIA Software License Agreement and AI
+Product Specific Terms in vendor/ovstage/LICENSE, and third-party notices in
+vendor/ovstage/THIRD-PARTY-NOTICES.txt. Use of these runtime components remains
+subject to those original terms. The independently separable GPL addon does
+not change those terms or make NVIDIA components subject to its GPL license.
+See vendor distribution metadata and the ZIP inventory for all dependency
+versions and preserved notices.
+
+ProtoMotions model, observation formulas and SMPL assets
+------------------------------------------------------
+tracker_math.py adapts the observation formulas in upstream humanoid.py and
+target_poses.py, Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES,
+under Apache-2.0. The full upstream license is assets/licenses/LICENSE.md.
+
+assets/smpl_amass/tracker.onnx is an actor-only conversion of the official
+NVlabs/ProtoMotions SMPL AMASS flat-terrain tracker, commit
+7a8417a9f55b1586b0d6e8f46578c5bc9d7ce1f1.
+tracker.json records source and output hashes. No policy training or guarantee
+of simulator-transfer equivalence is implied.
+
+assets/smpl_amass/walk.npz is converted from the official ProtoMotions v2.3
+SMPL walking example, commit 4a905b998101333a2fb91f2de8e2cab4bd0db68e.
+walk.json records the source, conversion, and SHA-256 values.
+
+assets/smpl_humanoid.xml and its PhysX USD conversion retain the upstream
+SMPL model's topology and physical parameters. SMPL-family body model assets
+are separately governed by their applicable model terms, as described in
+assets/licenses/THIRD-PARTY SOFTWARE NOTICES AND ASSET LICENSES - ProtoMotions.txt.
+The addon code license does not relicense these assets, motion or model files.
+
+Official sources
+----------------
+https://github.com/NVIDIA-Omniverse/PhysX
+https://github.com/NVIDIA-Omniverse/ovstage
+https://github.com/NVIDIA/warp
+https://github.com/microsoft/onnxruntime
+https://github.com/NVlabs/ProtoMotions
