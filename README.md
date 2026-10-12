@@ -1,6 +1,34 @@
-# Yugo - Blender Vtubing
+<p align="center">
+  <strong>English</strong> ·
+  <a href="docs/readme/README.zh-TW.md">繁體中文</a> ·
+  <a href="docs/readme/README.ja.md">日本語 (coming soon)</a> ·
+  <a href="docs/readme/README.ko.md">한국어 (coming soon)</a><br>
+  <a href="docs/readme/README.es.md">Español (coming soon)</a> ·
+  <a href="docs/readme/README.pt-BR.md">Português (Brasil) (coming soon)</a> ·
+  <a href="docs/readme/README.fr.md">Français (coming soon)</a>
+</p>
 
-**Turn Blender into a data mixing hub for VTubing and interactive experiences.**
+<h1 align="center">Yugo - Blender Vtubing</h1>
+
+<p align="center">
+  <strong>Turn Blender into a data mixing hub for VTubing and interactive experiences.</strong>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/w8QMZjVPtt"><strong>Discord</strong></a> ·
+  <a href="https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases"><strong>Release</strong></a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/"><strong>Yugo DOC</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://hiiiodigital.com/Yugo-Docs/tutorials/getting-started.html">Quick start</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/index.html#what-can-you-do">What you can achieve</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">Showcase (under construction)</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">FAQ (under construction)</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">Documentation</a>
+</p>
+
+Yugo DOC is the hub for tutorials, node references, and other project resources. Dedicated Showcase and FAQ pages are under construction; these two links open the Yugo DOC homepage for now.
 
 Yugo - Blender Vtubing is a Blender add-on for combining live tracking and interactive inputs, such as keyboard events and stream chatroom messages, in one visual workflow. Mix data from different sources to bring a character to life, then use the same building blocks to explore new ways for characters and objects to interact. Keyboard and stream chatroom support is currently in development.
 
@@ -51,7 +79,9 @@ the node editor and choose **Add → PhysX Physics → Create PhysX Tracker Demo
 Click **Play** on the **PhysX Physics** node to try the supplied skeleton and
 walking example. Your own VRM is not required for this demo.
 
-- [User documentation and Getting Started](https://hiiiodigital.com/Yugo-Docs/)
+- [Quick start in Yugo DOC](https://hiiiodigital.com/Yugo-Docs/tutorials/getting-started.html)
+- [Documentation in Yugo DOC](https://hiiiodigital.com/Yugo-Docs/)
+- [Join our Discord community](https://discord.gg/w8QMZjVPtt)
 - [Report an issue](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)
 
 ## License and acknowledgments
