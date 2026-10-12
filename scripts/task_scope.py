@@ -227,6 +227,7 @@ def is_documentation(path: str) -> bool:
     return (
         parts[-1] in ("readme.md", "contributing.md", "security.md")
         or lowered.startswith(("docs/", "templates/", ".github/issue_template/"))
+        or (lowered.startswith(".github/ai/") and lowered.endswith(".md"))
         or any(item is not None and product_documentation(item) for item in product_paths)
         or lowered == ".github/pull_request_template.md"
         or lowered.startswith(".github/pull_request_template/")

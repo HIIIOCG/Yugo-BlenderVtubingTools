@@ -10,10 +10,13 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = (
-    "AGENTS.md", "README.md", "CONTRIBUTING.md",
-    "docs/development/PARALLEL_DEVELOPMENT.md",
+    "AGENTS.md", "README.md", ".github/CONTRIBUTING.md", ".github/SECURITY.md",
+    ".github/ai/PARALLEL_DEVELOPMENT.md",
     "docs/development/NODE_BASELINE.md", "docs/development/TEST_MATERIALS.md",
-    "docs/development/CHAT_STARTERS.md", "docs/architecture/NODE_SYSTEM.md",
+    ".github/ai/CHAT_STARTERS.md", "docs/architecture/NODE_SYSTEM.md",
+    "docs/readme/README.zh-TW.md", "docs/readme/README.ja.md",
+    "docs/readme/README.ko.md", "docs/readme/README.es.md",
+    "docs/readme/README.pt-BR.md", "docs/readme/README.fr.md",
     "docs/legacy/YUGO_0_1_26.md", ".github/ISSUE_TEMPLATE/development_task.yml",
     ".github/pull_request_template.md",
     "scripts/start_task.py", "scripts/check_task_scope.py", "scripts/task_scope.py",
@@ -23,6 +26,7 @@ REQUIRED = (
     "addons/yugo/preset.blend", "addons/yugo/README.md", "addons/yugo/LICENSE",
     "addons/yugo/CHANGELOG.md", "addons/yugu_node_studio/README.md",
     "tests/governance/test_task_scope.py", "tests/governance/test_pr_scope.py",
+    "tests/governance/test_governance.py",
     "tests/yugo/_bootstrap.py", "scripts/run_blender_tests.py",
 )
 
@@ -62,7 +66,7 @@ def main() -> int:
         errors.append("Standalone addon license must match the repository license")
     with (ROOT / "addons/yugo/blender_manifest.toml").open("rb") as stream:
         excluded = tomllib.load(stream).get("build", {}).get("paths_exclude_pattern", [])
-    for name in ("/docs/", "/AGENTS.md", "/scripts/", "/tests/"):
+    for name in ("/.github/", "/docs/", "/AGENTS.md", "/scripts/", "/tests/"):
         if name not in excluded:
             errors.append(f"Legacy package must exclude {name}")
     template = (ROOT / ".github/pull_request_template.md").read_text(encoding="utf-8")

@@ -2,7 +2,7 @@
 
 你只要把對應指令貼給聊天。更新程式、建立獨立工作副本、測試與交付由工作
 聊天處理，不需要你一直手動 Pull。準備測試檔案請看
-[測試素材](TEST_MATERIALS.md)。
+[測試素材](../../docs/development/TEST_MATERIALS.md)。
 
 任務狀態與允許修改範圍，以 [GitHub Issues](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues)
 的最新內容為準。每個聊天開工時自行 `fetch origin`、核對最新 `origin/main`，
@@ -13,13 +13,13 @@
 
 結構 #8 與來源導入 #2 已完成；[PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15)
 將 qualified Studio 0.6.0 基準合併到 GitHub。來源在 `addons/yugu_node_studio/`，
-測試在 `tests/yugu_node_studio/`，驗證證據與未執行項目見 [NODE_BASELINE.md](NODE_BASELINE.md)。
+測試在 `tests/yugu_node_studio/`，驗證證據與未執行項目見 [NODE_BASELINE.md](../../docs/development/NODE_BASELINE.md)。
 後續聊天從 GitHub 主線建立自己的 worktree，原 `motion_codedev` 資料夾保持唯讀參考。
 
 ## 已完成：#3 公開介面；後續核心與測試
 
 #3 已由 [PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18)
-完成 qualified 合併。[PUBLIC_API.md](../architecture/PUBLIC_API.md) 定義功能宣告、
+完成 qualified 合併。[PUBLIC_API.md](../../docs/architecture/PUBLIC_API.md) 定義功能宣告、
 value／event／action、cards、共用排程、lifecycle 與 transform claims。
 #16 的 0.7.0 release candidate 已接入 Floating UI、Prop Physics 與原生 Ragdoll Motion；
 最終候選驗證與
@@ -51,7 +51,7 @@ value／event／action、cards、共用排程、lifecycle 與 transform claims�
 
 Studio 版本、建置與完整測試入口為 `scripts/node_check_version.py`、
 `scripts/node_build.py`、`scripts/node_run_checks.py`；完整指令見
-[CONTRIBUTING.md](../../CONTRIBUTING.md)。測試清單可用 `python -B scripts/node_run_checks.py --list` 查看。
+[CONTRIBUTING.md](../CONTRIBUTING.md)。測試清單可用 `python -B scripts/node_run_checks.py --list` 查看。
 
 ## 整合與任務紀錄
 
