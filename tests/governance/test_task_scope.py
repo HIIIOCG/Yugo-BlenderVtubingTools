@@ -251,6 +251,23 @@ class GitTaskTests(unittest.TestCase):
         result = self.checker(worker)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_docs_role_can_change_relocated_ai_guidance(self):
+        worker, _ = self.new_task(role="docs", scopes=[".github/ai/*.md"])
+        self.write(worker, ".github/ai/PARALLEL_DEVELOPMENT.md", "Parallel guidance\n")
+        self.write(worker, ".github/ai/CHAT_STARTERS.md", "Chat guidance\n")
+        result = self.checker(worker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_docs_role_cannot_change_code_in_ai_guidance_folder(self):
+        worker, _ = self.new_task(role="docs", scopes=[".github/ai/**"])
+        self.write(worker, ".github/ai/helper.py", "# Code\n")
+        self.assertRejected(worker, "documentation and templates only")
+
+    def test_docs_role_cannot_change_agents_in_ai_guidance_folder(self):
+        worker, _ = self.new_task(role="docs", scopes=[".github/ai/*.md"])
+        self.write(worker, ".github/ai/AGENTS.md", "Protected instructions\n")
+        self.assertRejected(worker, "require the integration role")
+
     def test_integration_still_requires_declared_scope(self):
         worker, _ = self.new_task(role="integration", scopes=["docs/**"])
         self.write(worker, "AGENTS.md", "Governance edit\n")
