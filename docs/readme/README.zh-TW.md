@@ -27,8 +27,6 @@
   <a href="https://hiiiodigital.com/Yugo-Docs/">完整文件</a>
 </p>
 
-Yugo DOC 集中收錄教學、節點參考與各種專案資料，目前以英文為主。
-
 Yugo - Blender Vtubing 是一套 Blender 外掛，讓你在同一個視覺化工作流程中組合即時追蹤與互動輸入，例如鍵盤事件和直播聊天室訊息。混合不同來源的資料，讓角色動起來，再用相同的基礎工具探索角色與物件之間的新互動方式。鍵盤與直播聊天室支援目前仍在開發中。
 
 ![在 Blender 中渲染的角色展示](../images/yugo-character-preview.webp)

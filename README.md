@@ -27,8 +27,6 @@
   <a href="https://hiiiodigital.com/Yugo-Docs/">Documentation</a>
 </p>
 
-Yugo DOC is the hub for tutorials, node references, and other project resources.
-
 Yugo - Blender Vtubing is a Blender add-on for combining live tracking and interactive inputs, such as keyboard events and stream chatroom messages, in one visual workflow. Mix data from different sources to bring a character to life, then use the same building blocks to explore new ways for characters and objects to interact. Keyboard and stream chatroom support is currently in development.
 
 ![Character showcase rendered in Blender](docs/images/yugo-character-preview.webp)
