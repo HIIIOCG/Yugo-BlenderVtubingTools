@@ -1,7 +1,7 @@
 # Repository instructions for every development chat
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md),
-[the parallel development rules](docs/development/PARALLEL_DEVELOPMENT.md), and
+Read [CONTRIBUTING.md](.github/CONTRIBUTING.md),
+[the parallel development rules](.github/ai/PARALLEL_DEVELOPMENT.md), and
 [the Node system boundaries](docs/architecture/NODE_SYSTEM.md) before editing.
 The human user's explicit instructions remain authoritative. These rules do not
 require a new approval for routine work already authorized by the user.

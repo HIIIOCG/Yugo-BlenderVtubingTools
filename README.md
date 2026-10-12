@@ -1,11 +1,11 @@
 <p align="center">
   <strong>English</strong> ·
   <a href="docs/readme/README.zh-TW.md">繁體中文</a> ·
-  <a href="docs/readme/README.ja.md">日本語 (coming soon)</a> ·
-  <a href="docs/readme/README.ko.md">한국어 (coming soon)</a><br>
-  <a href="docs/readme/README.es.md">Español (coming soon)</a> ·
-  <a href="docs/readme/README.pt-BR.md">Português (Brasil) (coming soon)</a> ·
-  <a href="docs/readme/README.fr.md">Français (coming soon)</a>
+  <a href="docs/readme/README.ja.md">日本語</a> ·
+  <a href="docs/readme/README.ko.md">한국어</a> ·
+  <a href="docs/readme/README.es.md">Español</a> ·
+  <a href="docs/readme/README.pt-BR.md">Português (Brasil)</a> ·
+  <a href="docs/readme/README.fr.md">Français</a>
 </p>
 
 <h1 align="center">Yugo - Blender Vtubing</h1>
@@ -15,20 +15,19 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/w8QMZjVPtt"><strong>Discord</strong></a> ·
-  <a href="https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases"><strong>Release</strong></a> ·
-  <a href="https://hiiiodigital.com/Yugo-Docs/"><strong>Yugo DOC</strong></a>
+  <a href="https://discord.gg/w8QMZjVPtt"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat&amp;logo=discord&amp;logoColor=white" alt="Discord community" height="24"></a>
+  <a href="https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases"><img src="https://img.shields.io/badge/Release-Download-2ea44f?style=flat&amp;logo=github&amp;logoColor=white" alt="Yugo releases" height="24"></a>
+  <a href="https://hiiiodigital.com/Yugo-Docs/"><img src="https://img.shields.io/badge/Yugo%20DOC-Documentation-2980b9?style=flat&amp;logo=readthedocs&amp;logoColor=white" alt="Yugo DOC documentation" height="24"></a>
 </p>
 
 <p align="center">
   <a href="https://hiiiodigital.com/Yugo-Docs/tutorials/getting-started.html">Quick start</a> ·
-  <a href="https://hiiiodigital.com/Yugo-Docs/index.html#what-can-you-do">What you can achieve</a> ·
-  <a href="https://hiiiodigital.com/Yugo-Docs/">Showcase (under construction)</a> ·
-  <a href="https://hiiiodigital.com/Yugo-Docs/">FAQ (under construction)</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">Showcase</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">FAQ</a> ·
   <a href="https://hiiiodigital.com/Yugo-Docs/">Documentation</a>
 </p>
 
-Yugo DOC is the hub for tutorials, node references, and other project resources. Dedicated Showcase and FAQ pages are under construction; these two links open the Yugo DOC homepage for now.
+Yugo DOC is the hub for tutorials, node references, and other project resources.
 
 Yugo - Blender Vtubing is a Blender add-on for combining live tracking and interactive inputs, such as keyboard events and stream chatroom messages, in one visual workflow. Mix data from different sources to bring a character to life, then use the same building blocks to explore new ways for characters and objects to interact. Keyboard and stream chatroom support is currently in development.
 
@@ -56,7 +55,6 @@ Yugo is designed to grow beyond avatar control into a toolkit for live performan
 **Yugo 0.2.3** includes Yugo Node and the original Yugo tools in one
 extension for **Windows x64**, **Linux x64**, and **macOS on Apple Silicon**,
 using **Blender 5.1 or 5.2**.
-Intel Macs and Blender 4.5 need a separate compatibility update.
 
 Download **yugo-0.2.3.zip** from the
 [Yugo 0.2.3 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.3).
