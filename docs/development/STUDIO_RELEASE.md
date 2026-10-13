@@ -18,8 +18,21 @@ Blender 5.1+：Edit → Preferences → Get Extensions → 右上選單 → Inst
 
 ## 使用者測試後發布
 
-整合角色确认測試結果與 final main commit，metadata 中兩個 version 一致且 `docs/releases/STUDIO_<version_with_underscores>.md` 已寫好，然後建立新的 `studio-v<version>` tag 並推送。
+整合角色確認測試結果與 final main commit，metadata 中兩個 version 一致，並依
+[release-writing rules](RELEASE_NOTES.md) 準備英文公開正文
+`docs/releases/STUDIO_<version_with_underscores>_NOTES.md`。正文只放實際安裝包
+下載、精簡的節點／功能變更及一行相容性；Studio 目前只有主安裝包，不增加
+不存在的選用套件連結。既有 `STUDIO_<version_with_underscores>.md` 及
+qualification 文件保留工程與驗收紀錄，不再直接作為公開正文。
 
-`.github/workflows/node-release.yml` 會核對 tag、main ancestry、未存在同名 release，從 tag 的乾淨原始碼建置並完成全套 portable regression / ZIP 安裝測試，最後建立 GitHub Release。附 ZIP、checksum 和 build provenance。失敗時不建立 release，保留 diagnostic artifacts。
+發布前執行下列檢查；成功時輸出已檢查的 repository 相對正文路徑：
 
-Studio tags 是 `studio-v*`；legacy tags 是 `v*`，兩條 workflow 不互相匹配。不重用既有 tag／release／asset；修正使用新版本。整合測試包完成不代表正式 release 已發布。
+```text
+python -B scripts/check_release_notes.py --product studio --tag studio-v<version>
+```
+
+完成候選驗證與正文檢查後，整合角色依任務授權建立新的 `studio-v<version>` tag 並推送。
+
+`.github/workflows/node-release.yml` 會核對 tag、main ancestry、未存在同名 release，檢查並直接讀取專用 `_NOTES.md` 正文，從 tag 的乾淨原始碼建置並完成全套 portable regression / ZIP 安裝測試，最後建立 GitHub Release。附 ZIP、checksum 和 build provenance；後兩者不追加至正文。失敗時不建立 release，保留 diagnostic artifacts。
+
+Studio tags 是 `studio-v*`；legacy tags 是 `v*`，兩條 workflow 不互相匹配。不重用既有 tag 或替換既有 asset；安裝包修正使用新版本。已授權的正文修訂保留 tag 與附件，也不授權新的發布。整合測試包完成或已有正文檔案不代表正式 release 已發布。

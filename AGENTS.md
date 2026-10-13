@@ -93,8 +93,15 @@ require a new approval for routine work already authorized by the user.
 - Only the integration role performs authorized merges, assigns product
   versions, updates release metadata, creates release tags, or publishes
   packages. Task branches must not invent competing version bumps.
+- Write public release bodies in English following [the release-writing rules](docs/development/RELEASE_NOTES.md):
+  package download links first, concise actual node/function changes, then one
+  compatibility line. Use the dedicated versioned `_NOTES.md` file and run
+  `scripts/check_release_notes.py` for the product. Keep installation guidance,
+  asset inventories, checksums, commits and engineering evidence out of the body.
 - A `v*` tag currently triggers the legacy release workflow. Keep existing
-  release tags and assets immutable; a corrected release gets a new version.
+  release tags and assets immutable; corrected packages get a new version.
+  An authorized body-only correction preserves those tags and assets and does
+  not authorize a new publication.
   Studio's version checker accepts only `studio-v<version>` tags. The integration
   role must verify the Studio release route and exact candidate before publishing.
 - Agent instructions and scope checks are coordination gates, not an operating
