@@ -153,6 +153,7 @@ jobs:
         if: always()
         with:
           name: yugo-release-validation
+          retention-days: 90
           path: |
             dist/*.zip
             dist/*.sha256
@@ -172,8 +173,8 @@ jobs:
             echo "::error::Existing releases are immutable; create a new product version"
             exit 1
           else
-            gh release create "$GITHUB_REF_NAME" "$package" "$package.sha256" "dist/release-build.json" \
-              "dist/${{ steps.physx.outputs.package }}" "dist/${{ steps.physx.outputs.package }}.sha256" "dist/physx-release-build.json" \
+            gh release create "$GITHUB_REF_NAME" "$package" \
+              "dist/${{ steps.physx.outputs.package }}" \
               --title "Yugo ${{ steps.metadata.outputs.version }}" \
               --notes-file "$RELEASE_NOTES" \
               --verify-tag

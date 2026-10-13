@@ -30,4 +30,4 @@ blend，animated/IK-driven、linked、constrained、mirrored、sheared 或 nonun
 
 ## 發布來源
 
-正式發布規劃由 `studio-v0.7.0` tag 的乾淨 GitHub 原始碼建置；驗證通過後，附件包含 installable ZIP、SHA-256 和來源 commit/file checksums。目前為 release candidate，尚不代表 tag 或 Release 已發布。Legacy Yugo 0.1.26 使用既有 `v*` release，產品 ID 和歷史版本保留。
+正式發布規劃由 `studio-v0.7.0` tag 的乾淨 GitHub 原始碼建置；驗證通過後，公開附件只上傳 Studio 安裝 ZIP。Checksum 與建置紀錄保留在 Actions 驗證產物，必要的長期證據依 [發布規則](../development/RELEASE_NOTES.md) 記錄。目前為 release candidate，尚不代表 tag 或 Release 已發布。Legacy Yugo 0.1.26 使用既有 `v*` release，產品 ID 和歷史版本保留。
