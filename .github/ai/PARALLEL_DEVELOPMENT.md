@@ -159,7 +159,14 @@ Blender user 路徑設成任務目錄，再啟動獨立程序；`--factory-start
 
 功能任務預設保留目前 product version，由整合角色安排整批成果的版本。
 只有整合角色可更新 release metadata、建立正式 tag 及執行已獲授權的發布。
-已發布 tag／asset 保留；需要修正時發布新版本。
+已發布 tag／asset 保留；安裝包需要修正時發布新版本。已授權的正文修訂
+保留既有 tag 與所有附件，不代表授權重製安裝包或建立新的發布。
+
+公開 Release 正文依 [release-writing rules](../../docs/development/RELEASE_NOTES.md)
+撰寫英文：先放主套件與實際選用套件的下載連結，再列本次節點／功能的精簡
+變更及用途，最後用一行說明相容性。專用 `_NOTES.md` 由發布流程檢查並直接
+使用；安裝教學、附件清單、checksum、commit 與工程驗證紀錄留在原本文件及
+交付紀錄，不放入公開正文。
 
 `v*` tag 對應 `addons/yugo/` 的 legacy release workflow。Studio package ID 是
 `yugu_node_studio`，版本檢查採 `studio-v<version>`；integration 角色在正式發布

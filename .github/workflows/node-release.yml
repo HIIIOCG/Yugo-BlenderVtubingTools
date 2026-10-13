@@ -33,8 +33,7 @@ jobs:
             echo "::error::Existing releases are immutable; use a new version"
             exit 1
           fi
-          notes="docs/releases/STUDIO_${version//./_}.md"
-          test -s "$notes"
+          notes=$(python -B scripts/check_release_notes.py --product studio --tag "$RELEASE_TAG")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "notes=$notes" >> "$GITHUB_OUTPUT"
       - uses: bradyajohnston/setup-blender@v5

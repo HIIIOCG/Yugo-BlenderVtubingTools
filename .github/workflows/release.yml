@@ -42,7 +42,9 @@ jobs:
             echo "::error::Existing releases are immutable; create a new product version"
             exit 1
           fi
+          notes=$(python -B scripts/check_release_notes.py --product yugo --tag "$RELEASE_TAG")
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
 
       - name: Install Blender 5.1
         uses: bradyajohnston/setup-blender@v5
@@ -114,12 +116,12 @@ jobs:
               output.write(f"package={archive.name}\n")
           PY
 
-      - name: Verify package bytes and prepare release notes
+      - name: Verify package bytes and record provenance
         env:
           RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           python - <<'PY'
-          import hashlib, json, os, re, zipfile
+          import hashlib, json, os, zipfile
           from pathlib import Path
 
           version = os.environ["RELEASE_VERSION"]
@@ -145,12 +147,6 @@ jobs:
                     "platforms": ["windows-x64", "linux-x64", "macos-arm64"],
                     "platform_qualification": "passed", "platform_build": qualification}
           Path("dist/release-build.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-          changelog = (source / "CHANGELOG.md").read_text(encoding="utf-8")
-          match = re.search(r"^## \[" + re.escape(version) + r"\].*?\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
-          assert match, "Missing release changelog section"
-          notes = match.group(1).split("\n[0.", 1)[0].strip()
-          notes += f"\n\nSource commit: `{record['source_commit']}`\n\nSHA-256: `{checksum}`\n"
-          Path("dist/release-notes.md").write_text(notes, encoding="utf-8")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -163,12 +159,13 @@ jobs:
             dist/release-build.json
             dist/physx-build.json
             dist/physx-release-build.json
-            dist/release-notes.md
+            ${{ steps.metadata.outputs.notes }}
             dist/physx-build/extension-*.log
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ steps.metadata.outputs.notes }}
         run: |
           package="dist/yugo-${{ steps.metadata.outputs.version }}.zip"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -178,6 +175,6 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "$package" "$package.sha256" "dist/release-build.json" \
               "dist/${{ steps.physx.outputs.package }}" "dist/${{ steps.physx.outputs.package }}.sha256" "dist/physx-release-build.json" \
               --title "Yugo ${{ steps.metadata.outputs.version }}" \
-              --notes-file dist/release-notes.md \
+              --notes-file "$RELEASE_NOTES" \
               --verify-tag
           fi
