@@ -76,3 +76,11 @@ Yugo 使用了以下開源專案：
 | --- | --- | --- |
 | [VRM Add-on for Blender](https://github.com/saturday06/VRM-Addon-for-Blender/blob/main/LICENSE_MAIN.txt) | VRM 角色資料與整合 | MIT OR GPL-3.0-or-later |
 | [MuJoCo](https://github.com/google-deepmind/mujoco/blob/3.3.7/LICENSE) | 物理模擬 | Apache-2.0 |
+
+## 貢獻者致謝
+
+感謝所有透過程式、翻譯、設計、文件與測試協助 Yugo 的貢獻者。
+
+| 貢獻者 | 貢獻內容 | Discord |
+| --- | --- | --- |
+| **Jems / L’Archiviste** | README 法文翻譯 | `owarileviathan` |

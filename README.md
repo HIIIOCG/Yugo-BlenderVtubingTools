@@ -90,3 +90,11 @@ Yugo builds on these open-source projects:
 | --- | --- | --- |
 | [VRM Add-on for Blender](https://github.com/saturday06/VRM-Addon-for-Blender/blob/main/LICENSE_MAIN.txt) | VRM character data and integration | MIT OR GPL-3.0-or-later |
 | [MuJoCo](https://github.com/google-deepmind/mujoco/blob/3.3.7/LICENSE) | Physics simulation | Apache-2.0 |
+
+## Contributors
+
+Thank you to everyone who helps improve Yugo through code, translations, design, documentation, and testing.
+
+| Contributor | Contribution | Discord |
+| --- | --- | --- |
+| **Jems / L’Archiviste** | French README translation | `owarileviathan` |

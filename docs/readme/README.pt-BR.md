@@ -21,3 +21,11 @@ This README translation is under construction. Please use [English](../../README
   <a href="https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases"><img src="https://img.shields.io/badge/Release-Download-2ea44f?style=flat&amp;logo=github&amp;logoColor=white" alt="Yugo releases" height="24"></a>
   <a href="https://hiiiodigital.com/Yugo-Docs/"><img src="https://img.shields.io/badge/Yugo%20DOC-Documentation-2980b9?style=flat&amp;logo=readthedocs&amp;logoColor=white" alt="Yugo DOC documentation" height="24"></a>
 </p>
+
+## Agradecimentos
+
+Agradecemos a todas as pessoas que contribuem com código, traduções, design, documentação e testes para o Yugo.
+
+| Colaborador | Contribuição | Discord |
+| --- | --- | --- |
+| **Jems / L’Archiviste** | Tradução do README para o francês | `owarileviathan` |
