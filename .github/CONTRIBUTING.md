@@ -1,47 +1,47 @@
-# Contributing / 開發與交付
+# Contributing
 
-所有開發者與 AI 聊天先讀 [AGENTS.md](../AGENTS.md)、[並行流程](ai/PARALLEL_DEVELOPMENT.md) 與 [Node 架構](../docs/architecture/NODE_SYSTEM.md)。一項任務、一個負責聊天、一個分支、一個獨立工作副本、一個聚焦的 PR。
+All developers and AI chats must first read [AGENTS.md](../AGENTS.md), the [parallel development workflow](ai/PARALLEL_DEVELOPMENT.md), and the [Node architecture](../docs/architecture/NODE_SYSTEM.md). Each task has one responsible chat, one branch, one isolated working copy, and one focused PR.
 
-## 開始任務
+## Starting a task
 
-1. 從 [GitHub Issues](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues) 選擇已具備前置條件的任務；[開工入口](ai/CHAT_STARTERS.md)提供對話順序與指令。
-2. 統籌角色確認負責聊天、角色、允許路徑、共用介面與測試資源，記錄認領狀態。
-3. 負責聊天自行執行 git fetch origin，核對正式 remote 與最新 origin/main；不得丟棄原有工作來同步，不要求老闆先在 GitHub Desktop 按 Pull。
-4. 使用 scripts/start_task.py 建立獨立 worktree，或由統籌角色建立並記錄等效隔離環境。
-5. 核對 worktree 的絕對路徑與分支；所有工具明確使用該路徑。
+1. Choose a task from [GitHub Issues](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/issues) whose prerequisites are satisfied. The [task starting guide](ai/CHAT_STARTERS.md) provides the chat sequence and commands.
+2. The coordinating role confirms the responsible chat, role, allowed paths, shared interfaces, and test resources, and records the task assignment.
+3. The responsible chat runs `git fetch origin` itself and verifies the official remote and latest `origin/main`. Do not discard existing work to synchronize, or ask the project owner to click Pull in GitHub Desktop first.
+4. Use `scripts/start_task.py` to create an isolated worktree, or have the coordinating role create and document an equivalent isolated environment.
+5. Verify the worktree's absolute path and branch. All tools must explicitly use that path.
 
-任務 #2 已在結構整理 #8 之後透過 [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15) 匯入 qualified Studio 0.6.0 基準；#3 的 qualified 公開介面已透過 [PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18) 合併，契約見 [PUBLIC_API.md](../docs/architecture/PUBLIC_API.md)。#16 的 0.7.0 release candidate 已接入 Floating UI、Prop Physics 與原生 Ragdoll Motion adapter；完整候選驗證及發布狀態以整合紀錄為準。正式來源在 `addons/yugu_node_studio/`，測試在 `tests/yugu_node_studio/`。以 repository 的 worktree 為唯一可編輯來源，原 motion_codedev 來源是唯讀參考，不維持雙向人工同步。
+Task #2 imported the qualified Studio 0.6.0 baseline through [PR #15](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/15), following the structural cleanup in #8. The qualified public interfaces for #3 were merged through [PR #18](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/pull/18); their contract is documented in [PUBLIC_API.md](../docs/architecture/PUBLIC_API.md). The 0.7.0 release candidate for #16 now includes Floating UI, Prop Physics, and the native Ragdoll Motion adapter. Consult the integration records for complete candidate validation and release status. The official source is in `addons/yugu_node_studio/`, and tests are in `tests/yugu_node_studio/`. Use the repository worktree as the sole editable source. The original `motion_codedev` source is a read-only reference; do not maintain manual two-way synchronization.
 
-開發中保持已記錄的基準；採用新合併依賴時再 fetch，明確整合並更新基準，重跑受影響檢查。整合角色在驗證合併候選前自行取得最新主線。閒置對話與老闆的桌面資料夾不會因其他對話更新而自動同步。
+Keep the recorded baseline during development. Fetch again when adopting newly merged dependencies, explicitly integrate them, update the baseline, and rerun affected checks. The integration role must obtain the latest mainline itself before validating a merge candidate. Idle chats and the project owner's desktop folders do not automatically synchronize when other chats update their working copies.
 
-## 驗證與交付
+## Validation and delivery
 
-- 執行 python -B scripts/check_task_scope.py，核對提交、暫存、未暫存及未追蹤變更。
-- 修改規範或入口文件時，執行 python -B scripts/check_governance.py，檢查必要文件、連結與打包排除。
-- Studio 執行 `python -B scripts/node_check_version.py`；舊 Yugo 執行 `python -B scripts/check_version.py`，再執行本次變更相關的檢查；使用 -B 避免快取。
-- 修改隔離工具時，執行 python -B -m unittest discover -s tests/governance -p "test_*.py"。
-- 舊版 smoke 入口是 `python -B scripts/run_blender_tests.py --blender "<Blender 執行檔絕對路徑>"`；用 `--list` 查看可選測試，未安排的 VRM／GUI 檢查記為未執行。
-- 修改外掛時，使用 Blender 5.1+，驗證來源、建置、ZIP 與相關功能；測試 profile、輸出與場景使用任務自己的副本。
-- Studio 獨立建置入口是 `scripts/node_build.py`，測試入口是 `scripts/node_run_checks.py`，功能測試在 `tests/yugu_node_studio/`；兩個工具都使用任務專屬 Blender profile 與輸出。Windows 舊版建置入口 `scripts/build.ps1` 及 `scripts/check_version.py` 繼續只處理 `addons/yugo/`，舊版測試在 `tests/yugo/`。
-- PR 使用範本，附上任務 ID、角色、允許路徑、依賴、實際測試與相容性影響。未通過的檢查列為問題，不把略過當成通過。
-- 統籌角色更新至最新主線，驗證實際合併候選，再依序合併。普通功能聊天不建立正式 tag 或覆寫既有 Release。
+- Run `python -B scripts/check_task_scope.py` to check committed, staged, unstaged, and untracked changes.
+- When changing governance or entry-point documents, run `python -B scripts/check_governance.py` to check required files, links, and packaging exclusions.
+- For Studio, run `python -B scripts/node_check_version.py`. For legacy Yugo, run `python -B scripts/check_version.py`. Then run the checks relevant to the change. Use `-B` to avoid generating Python caches.
+- When changing isolation tools, run `python -B -m unittest discover -s tests/governance -p "test_*.py"`.
+- The legacy smoke-test entry point is `python -B scripts/run_blender_tests.py --blender "<absolute path to the Blender executable>"`. Use `--list` to see available tests, and record any VRM or GUI checks that were not scheduled as not run.
+- When changing an add-on, use Blender 5.1+ and validate the source, build, ZIP package, and affected functionality. Use task-specific copies of test profiles, output, and scenes.
+- Studio's standalone build entry point is `scripts/node_build.py`, its test entry point is `scripts/node_run_checks.py`, and its functional tests are in `tests/yugu_node_studio/`. Both tools use a task-specific Blender profile and output. The legacy Windows build entry point, `scripts/build.ps1`, and `scripts/check_version.py` continue to handle only `addons/yugo/`; legacy tests are in `tests/yugo/`.
+- Use the PR template and include the task ID, role, allowed paths, dependencies, tests actually run, and compatibility impact. List failed checks as issues; do not count skipped checks as passed.
+- The coordinating role updates to the latest mainline, validates the actual merge candidate, and then merges PRs in sequence. Regular feature chats must not create official tags or overwrite existing Releases.
 
-Studio 的 PowerShell 建置與完整驗證入口：
+Studio's PowerShell build and full validation commands:
 
 ```powershell
 python -B scripts/node_check_version.py
-python -B scripts/node_build.py --blender "<Blender 執行檔絕對路徑>"
+python -B scripts/node_build.py --blender "<absolute path to the Blender executable>"
 $StudioVersion = python -B scripts/node_check_version.py --print-version
-python -B scripts/node_run_checks.py --blender "<Blender 執行檔絕對路徑>" --package "dist/yugu_node_studio-$StudioVersion.zip" --output artifacts/node-checks
+python -B scripts/node_run_checks.py --blender "<absolute path to the Blender executable>" --package "dist/yugu_node_studio-$StudioVersion.zip" --output artifacts/node-checks
 python -B scripts/node_run_checks.py --list
 ```
 
-建置驗證來源、ZIP、完整部署檔案清單與內容；測試核對實際載入的 repository 來源及生成範例。官方 VRM extension 或真人全域鍵盤驗收需要的項目，依 [Node 基準](../docs/development/NODE_BASELINE.md) 明確記錄 prerequisite 與未執行範圍。Studio tag 採 `studio-v<version>`；正式發布由 integration 角色依 [Studio release 流程](../docs/development/STUDIO_RELEASE.md) 驗證路由後執行，legacy 的 `v*` 路由保留。
+Build validation checks the source, ZIP package, complete deployment file list, and file contents. Tests verify the repository source actually loaded and the generated examples. For checks requiring the official VRM extension or manual global-keyboard acceptance testing, explicitly record the prerequisites and checks not run according to the [Node baseline](../docs/development/NODE_BASELINE.md). Studio tags use `studio-v<version>`. The integration role handles official releases after verifying the routing according to the [Studio release workflow](../docs/development/STUDIO_RELEASE.md). The legacy `v*` release route remains in place.
 
-不提交生成 ZIP、Python cache、Blender recovery、個人 profile、.dev/、工作副本或本機連線設定。必要的受控 .blend 資產與測試 fixture 可以提交，但必須說明用途。
+Do not commit generated ZIP packages, Python caches, Blender recovery files, personal profiles, `.dev/`, working copies, or local connection settings. Required version-controlled `.blend` assets and test fixtures may be committed, but their purpose must be explained.
 
-動作、角色與 Blender 測試檔依 [素材準備與交接](../docs/development/TEST_MATERIALS.md)處理；原件唯讀，測試使用自己的副本。大型或私有素材先留在本機／指定共享儲存，不自行上傳。
+Handle motions, characters, and Blender test files according to [test material preparation and handoff](../docs/development/TEST_MATERIALS.md). Keep originals read-only and use your own copies for testing. Keep large or private materials locally or in designated shared storage; do not upload them on your own.
 
-Bug 報告請附產品與版本、Blender 版本、作業系統、重現步驟與必要錯誤輸出。移除私有 avatar 與網路資訊。
+Bug reports should include the product and version, Blender version, operating system, reproduction steps, and relevant error output. Remove private avatar and network information.
 
 By contributing, you agree that your contribution is licensed under GPL-3.0-or-later.
