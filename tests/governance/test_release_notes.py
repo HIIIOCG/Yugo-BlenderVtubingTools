@@ -1,11 +1,14 @@
 """Keep public release copy concise, versioned, and on the right product route."""
 
 from contextlib import redirect_stderr, redirect_stdout
+from fnmatch import fnmatchcase
 import io
 from pathlib import Path
 import re
+import shlex
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -228,6 +231,15 @@ class ReleaseRoutingTests(unittest.TestCase):
 
 
 class RepositoryPublicationTests(unittest.TestCase):
+    def workflow_packages(self):
+        packages = {}
+        for package_id in ("yugo", "yugo_physx_tracker", "yugu_node_studio"):
+            manifest = tomllib.loads(
+                (ROOT / "addons" / package_id / "blender_manifest.toml").read_text(encoding="utf-8")
+            )
+            packages[package_id] = f"{package_id}-{manifest['version']}.zip"
+        return packages
+
     def test_current_product_notes_pass(self):
         for product in ("yugo", "studio"):
             with self.subTest(product=product):
@@ -250,6 +262,75 @@ class RepositoryPublicationTests(unittest.TestCase):
                 self.assertLess(checked.start(), text.index("gh release create"))
                 self.assertNotRegex(text, r"--generate-notes|--notes(?:\s|=)")
                 self.assertNotRegex(text, r"CHANGELOG\.md|Source commit:|SHA-?256:")
+
+    def test_release_commands_select_only_installable_packages(self):
+        packages = self.workflow_packages()
+        for workflow, package_ids in (
+            ("release.yml", ("yugo", "yugo_physx_tracker")),
+            ("node-release.yml", ("yugu_node_studio",)),
+        ):
+            with self.subTest(workflow=workflow):
+                text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+                version = packages[package_ids[0]].removeprefix(package_ids[0] + "-").removesuffix(".zip")
+                text = re.sub(r"\$\{\{\s*steps\.metadata\.outputs\.version\s*\}\}", version, text)
+                text = re.sub(r"\$\{\{\s*steps\.physx\.outputs\.package\s*\}\}", packages["yugo_physx_tracker"], text)
+                text = text.replace("$RELEASE_VERSION", version)
+                # Read the shell command's arguments, including assets after options.
+                text = re.sub(r"\\\n\s*", " ", text)
+                commands = re.findall(r"(?m)^\s*gh release create ([^\n]+)", text)
+                self.assertEqual(len(commands), 1)
+                package_assignments = re.findall(r"(?m)^\s*package=([^\n]+)", text)
+                command = commands[0]
+                if package_assignments:
+                    command = command.replace("$package", shlex.split(package_assignments[-1])[0])
+                arguments = iter(shlex.split(command)[1:])  # Skip the release tag.
+                assets = []
+                for argument in arguments:
+                    if argument in ("--title", "--notes-file"):
+                        next(arguments)
+                    elif argument == "--verify-tag":
+                        continue
+                    else:
+                        self.assertFalse(argument.startswith("-"), f"Review new release option: {argument}")
+                        assets.append(argument)
+                self.assertCountEqual(assets, [f"dist/{packages[key]}" for key in package_ids])
+                self.assertNotRegex(text, r"gh\s+release\s+upload\b", "Keep additional assets out of public releases")
+
+    def test_checksums_and_provenance_remain_in_90_day_actions_artifacts(self):
+        packages = self.workflow_packages()
+        for workflow, evidence in (
+            ("release.yml", [
+                f"dist/{packages['yugo']}.sha256", f"dist/{packages['yugo_physx_tracker']}.sha256",
+                "dist/release-build.json", "dist/physx-build.json", "dist/physx-release-build.json",
+            ]),
+            ("node-release.yml", [
+                f"dist/{packages['yugu_node_studio']}.sha256", "dist/studio-build.json",
+                "artifacts/studio-release/results.json",
+            ]),
+        ):
+            with self.subTest(workflow=workflow):
+                text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+                uploads = re.findall(
+                    r"(?ms)^      - uses: actions/upload-artifact@[^\n]+\n(.*?)(?=^      - |\Z)", text,
+                )
+                self.assertEqual(len(uploads), 1)
+                upload = uploads[0]
+                self.assertRegex(upload, r"(?m)^\s*if:\s*always\(\)\s*$")
+                self.assertRegex(upload, r"(?m)^\s*retention-days:\s*90\s*$")
+                path_field = re.search(r"(?m)^([ ]*)path:\s*\|\s*\n", upload)
+                self.assertIsNotNone(path_field)
+                patterns = []
+                for line in upload[path_field.end():].splitlines():
+                    if line.strip() and len(line) - len(line.lstrip()) <= len(path_field[1]):
+                        break
+                    if line.strip():
+                        patterns.append(line.strip())
+                for path in evidence:
+                    self.assertTrue(
+                        any(fnmatchcase(path, pattern) for pattern in patterns if not pattern.startswith("!"))
+                        and not any(fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!")),
+                        f"Actions artifacts must retain {path}",
+                    )
 
 
 if __name__ == "__main__":

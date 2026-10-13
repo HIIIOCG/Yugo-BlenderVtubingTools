@@ -33,6 +33,11 @@ python -B scripts/check_release_notes.py --product studio --tag studio-v<version
 
 完成候選驗證與正文檢查後，整合角色依任務授權建立新的 `studio-v<version>` tag 並推送。
 
-`.github/workflows/node-release.yml` 會核對 tag、main ancestry、未存在同名 release，檢查並直接讀取專用 `_NOTES.md` 正文，從 tag 的乾淨原始碼建置並完成全套 portable regression / ZIP 安裝測試，最後建立 GitHub Release。附 ZIP、checksum 和 build provenance；後兩者不追加至正文。失敗時不建立 release，保留 diagnostic artifacts。
+`.github/workflows/node-release.yml` 會核對 tag、main ancestry、未存在同名 release，檢查並直接讀取專用 `_NOTES.md` 正文，從 tag 的乾淨原始碼建置並完成全套 portable regression / ZIP 安裝測試，最後建立 GitHub Release。未來公開附件只上傳 Studio 安裝 ZIP，不附 checksum 或 JSON build report；GitHub 自動提供的 Source code ZIP／tar.gz 連結仍會保留。失敗時不建立 release，保留 diagnostic artifacts。
+
+Checksum 與 `studio-build.json` 繼續生成、驗證，與測試證據一起存入
+`studio-release-validation` Actions artifact，明確設定 `retention-days: 90`。
+Artifact 會到期；確切來源 commit、安裝包 digest 與檢查結果摘要另記在既有發布
+任務或 qualification 紀錄，保留到期後仍需使用的證據。已發布版本的附件不刪除。
 
 Studio tags 是 `studio-v*`；legacy tags 是 `v*`，兩條 workflow 不互相匹配。不重用既有 tag 或替換既有 asset；安裝包修正使用新版本。已授權的正文修訂保留 tag 與附件，也不授權新的發布。整合測試包完成或已有正文檔案不代表正式 release 已發布。

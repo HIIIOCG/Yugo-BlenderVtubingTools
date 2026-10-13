@@ -1,7 +1,8 @@
 # Public release-writing rules
 
-These rules apply to the public GitHub Release body for Yugo and Yugu Node
-Studio. Write for someone choosing a download and checking what changed.
+These rules apply to the public GitHub Release body and uploaded assets for
+Yugo and Yugu Node Studio. Write for someone choosing a download and checking
+what changed.
 The integration role prepares and reviews the body as part of the existing
 release task; this document does not authorize publication.
 
@@ -78,12 +79,25 @@ running the checker. A format check cannot establish feature behavior or prove
 platform compatibility. Keep those review and validation records outside the
 public body.
 
-## Published assets and body corrections
+## Release assets and body corrections
+
+For future releases, upload only installable ZIPs as public release assets:
+Yugo's main ZIP and optional PhysX Tracker ZIP, or Studio's main ZIP. Do not
+attach checksum sidecars or JSON build reports. GitHub's automatic Source code
+ZIP and tar.gz links remain separate from these uploaded installers.
+
+Keep generating and verifying checksums and build reports. Store them with
+the validation evidence in the `yugo-release-validation` or
+`studio-release-validation` Actions artifact, with `retention-days: 90`.
+These artifacts expire; they are not a permanent archive. Record the exact
+source commit, installer digests, and check-result summary in the existing
+release task or qualification record so that essential evidence remains
+available after artifact expiration.
 
 Preserve existing release tags and all published assets, including ZIPs,
-checksums, and build reports. The concise body does not remove those records or
-change their upload and validation requirements. A package correction requires
-a new product version; never replace the bytes under an existing asset URL.
+checksums, and build reports; the new upload policy does not remove historical
+assets. A package correction requires a new product version; never replace
+the bytes under an existing asset URL.
 
 An authorized correction to a public release body may clarify its downloads
 or wording while preserving the existing tag and every asset. Update the

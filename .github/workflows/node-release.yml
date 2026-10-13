@@ -47,6 +47,7 @@ jobs:
         if: always()
         with:
           name: studio-release-validation
+          retention-days: 90
           path: |
             dist/yugu_node_studio-*.zip
             dist/*.sha256
@@ -62,8 +63,6 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             "dist/yugu_node_studio-$RELEASE_VERSION.zip" \
-            "dist/yugu_node_studio-$RELEASE_VERSION.zip.sha256" \
-            "dist/studio-build.json" \
             --title "Yugu Node Studio $RELEASE_VERSION" \
             --notes-file "$RELEASE_NOTES" \
             --verify-tag
