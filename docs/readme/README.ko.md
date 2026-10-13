@@ -26,6 +26,6 @@ This README translation is under construction. Please use [English](../../README
 
 코드, 번역, 디자인, 문서 작성, 테스트를 통해 Yugo에 기여해 주시는 모든 분께 감사드립니다.
 
-| 기여자 | 기여 내용 | Discord |
-| --- | --- | --- |
-| **Jems / L’Archiviste** | README 프랑스어 번역 | `owarileviathan` |
+| 기여자 | 기여 내용 |
+| --- | --- |
+| **Jems / L’Archiviste** | README 프랑스어 번역 |

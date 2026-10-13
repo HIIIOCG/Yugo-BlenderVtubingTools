@@ -84,6 +84,6 @@ Yugo builds on these open-source projects:
 
 Merci à toutes les personnes qui contribuent au code, aux traductions, au design, à la documentation et aux tests de Yugo.
 
-| Contributeur | Contribution | Discord |
-| --- | --- | --- |
-| **Jems / L’Archiviste** | Traduction française du README | `owarileviathan` |
+| Contributeur | Contribution |
+| --- | --- |
+| **Jems / L’Archiviste** | Traduction française du README |

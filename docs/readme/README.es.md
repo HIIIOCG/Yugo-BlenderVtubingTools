@@ -26,6 +26,6 @@ This README translation is under construction. Please use [English](../../README
 
 Gracias a todas las personas que contribuyen a Yugo con código, traducciones, diseño, documentación y pruebas.
 
-| Colaborador | Contribución | Discord |
-| --- | --- | --- |
-| **Jems / L’Archiviste** | Traducción del README al francés | `owarileviathan` |
+| Colaborador | Contribución |
+| --- | --- |
+| **Jems / L’Archiviste** | Traducción del README al francés |

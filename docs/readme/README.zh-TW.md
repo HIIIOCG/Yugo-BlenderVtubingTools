@@ -81,6 +81,6 @@ Yugo 使用了以下開源專案：
 
 感謝所有透過程式、翻譯、設計、文件與測試協助 Yugo 的貢獻者。
 
-| 貢獻者 | 貢獻內容 | Discord |
-| --- | --- | --- |
-| **Jems / L’Archiviste** | README 法文翻譯 | `owarileviathan` |
+| 貢獻者 | 貢獻內容 |
+| --- | --- |
+| **Jems / L’Archiviste** | README 法文翻譯 |
