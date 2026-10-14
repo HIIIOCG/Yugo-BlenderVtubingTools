@@ -8,10 +8,11 @@
   <strong>Français</strong>
 </p>
 
-<h1 align="center">Yugo - Blender Vtubing</h1>
+<h1 align="center">Yugo - Blender VTubing</h1>
+
 
 <p align="center">
-  <strong>Transformez Blender en un espace où combiner des données pour le VTubing et les expériences interactives.</strong>
+  <strong>Transformer Blender en votre nouvel environnement de VTubing à grande échelle.</strong>
 </p>
 
 <p align="center">
@@ -22,46 +23,48 @@
 
 <p align="center">
   <a href="https://hiiiodigital.com/Yugo-Docs/tutorials/getting-started.html">Démarrage rapide</a> ·
-  <a href="https://hiiiodigital.com/Yugo-Docs/">Démonstrations</a> ·
+  <a href="https://hiiiodigital.com/Yugo-Docs/">Showcase</a> ·
   <a href="https://hiiiodigital.com/Yugo-Docs/">FAQ</a> ·
   <a href="https://hiiiodigital.com/Yugo-Docs/">Documentation</a>
 </p>
 
-Yugo - Blender Vtubing est un add-on (extension) pour Blender combinant le suivi en temps réel et des entrées interactives, comme les événements du clavier ou les messages du chat reçus en stream, le tout dans un seul et même flux de travail visuel. Rassemblez et combinez des données provenant de sources différentes afin de rendre votre personnage de VTubing plus vivant, puis utilisez ces mêmes blocs de construction pour explorer de nouvelles façons de faire interagir les personnages et les objets. La prise en charge du clavier et des messages du chat en stream est actuellement en cours de développement.
+Yugo - Blender Vtubing est un add-on (extension) pour Blender combinant suivi et gestion temps réel d'événements comme les entrées clavier ou les messages du chat reçus en stream, tout ceci en un seul et même espace de travail. Rassemblez et combinez diverses informations/données provenant de sources différentes afin de rendre votre personnage de VTubing plus vivant que jamais, puis utilisez ces mêmes blocs de construction pour explorer l'infinité d’interactions possibles, entre votre avatar, et votre propre monde 3D.
+La prise en charge du clavier et des messages du chat en stream est actuellement en cours de développement.
 
 ![Présentation d’un personnage rendu dans Blender](../images/yugo-character-preview.webp)
 
 ## Que peut-on y faire ?
 
-- **Intégrez les mouvements et expressions en direct.** Recevez les mouvements du corps et les expressions via VMC, ainsi que le suivi facial via iFacialMocap. *D’autres méthodes de suivi sont en cours de développement.*
-- **Définissez les mouvements et expressions.** Mélangez les sources, choisissez les parties du corps ou du visage qu’elles affectent, et ajustez la force, le lissage, l’effet miroir ainsi que le délai de chaque mouvement.
+- **Intégrez mouvements et expressions en direct.** Recevez les mouvements du corps et ses expressions via VMC, ainsi que le suivi facial grâce à iFacialMocap. *D’autres méthodes de suivi sont en cours de développement.*
+- **Définissez les mouvements et expressions.** Mélangez les sources, choisissez les parties du corps ou du visage qu’elles affectent, et ajustez la force, le lissage, la copie en miroir ainsi que le délai de chaque mouvement.
 - **Ajoutez des interactions physiques.** Utilisez les réglages de corps rigides de Blender pour définir le comportement des objets de votre scène, puis combinez-les avec la physique des ressorts VRM (« spring physics ») pour les interactions entre personnages et objets.
-- **Faites vos propres combinaisons.** Combinez plusieurs sources de mouvements avec des valeurs, des calculs, des paramètres temporels et des conditions pour créer vos propres configurations de performance et d’interaction en direct.
+- **Faites vos propres combinaisons.** Combinez plusieurs sources de mouvements avec des valeurs, des calculs, des timings et des conditions pour créer vos propres configurations de performance et d’interaction en direct.
 
 ## Un espace pour les interactions créatives
 
 L’idée est simple : importer des données dans Blender, les mélanger et les transformer, puis décider comment ces dernières agiront sur votre scène.
 
-Yugo est conçu pour évoluer au-delà du simple contrôle d’avatar et devenir une boîte à outils pour les performances en direct, les interactions ludiques et les expérimentations directement dans Blender.
+Yugo est conçu pour s'épanouir au-delà du simple contrôle d’avatar et devenir une boîte à outils pour les performances en direct, les interactions enjouées et les expérimentations directement dans Blender.
 
 ![Exemple de scène Yugo dans Blender](../images/yugo-blender-scene.webp)
 
-*Une scène présentée lors de notre présentation à la BCON26.*
+*Scène présentée lors de notre présentation à la BCON26.*
 
 ## Installation
 
-**Yugo 0.2.3** inclut **Yugo Node** et les outils originaux de **Yugo** dans une seule extension pour Blender, sur **Windows x64**, **Linux x64** et **macOS sur Apple Silicon**, avec **Blender 5.1 ou 5.2**.
+**Yugo 0.2.3** inclut **Yugo Node** et les outils originaux de **Yugo** dans une seule extension pour Blender, sur : **Windows x64**, **Linux x64** et **macOS sur Apple Silicon**, avec **Blender 5.1 ou 5.2**.
 
-Téléchargez **yugo-0.2.3.zip** depuis la [page de publication de Yugo 0.2.3](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.3).
-Dans Blender, ouvrez **Edit → Preferences → Get Extensions → Install from Disk**, sélectionnez le fichier ZIP et activez **Yugo**.
+Téléchargez **yugo-0.2.3.zip** dès maintenant ici : [Yugo 0.2.3 release](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/tag/v0.2.3).
+Dans Blender, ouvrez **Édition → Préférences → Obtenir des extensions → Installer depuis le disque**, sélectionnez le fichier .ZIP et activez **Yugo**.
 
 Dans la Vue 3D, appuyez sur **N**, accédez à l’onglet **Yugo** et utilisez **Open Yugo Node Editor** en haut de l’onglet. **Help** ouvre le manuel. Yugo Node est inclus par défaut ; aucune installation séparée n’est requise.
 
-Si vous mettez à jour un ancien **Yugo 0.1.x**, sauvegardez votre scène, désactivez l’ancienne extension Yugo et installez le nouveau ZIP dans le même dépôt d’extensions. Redémarrez Blender et vérifiez que l’extension **Yugo** activée affiche bien la version **0.2.3**.
-Si vous avez aussi installé un **Yugo Node** ou **Yugu Node Studio** séparément, désactivez cet ancien add-on avant d’activer Yugo. Les nouveaux utilisateurs peuvent ignorer ces étapes de mise à jour.
+Si vous mettez à jour un ancien **Yugo 0.1.x**, sauvegardez votre scène, désactivez l’ancienne extension Yugo et installez le nouveau .ZIP dans le même dépôt d’extensions. Redémarrez Blender et vérifiez que l’extension **Yugo**, affiche bien la version **0.2.3**.
+Si vous avez aussi installé un **Yugo Node** ou **Yugu Node Studio** séparément, désactivez cet ancien add-on avant d’activer Yugo.
+**Remarque** : Les nouveaux utilisateurs peuvent ignorer ces étapes de mise à jour.
 
-L’add-on optionnel [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.2/yugo_physx_tracker-0.4.0.zip) est un add-on séparé pour **Blender 5.1/5.2 sur Windows x64**. Son package existant et sa somme de contrôle (« checksum ») restent inchangés ; le support de PhysX pour Linux et macOS n’est pas inclus dans cette version.
-Installez son ZIP (environ 242 Mo) après avoir activé Yugo, puis ouvrez l’éditeur de nœuds et choisissez **Add → PhysX Physics → Create PhysX Tracker Demo**.
+L’add-on optionnel [ProtoMotions / PhysX Tracker 0.4.0](https://github.com/HIIIOCG/Yugo-BlenderVtubingTools/releases/download/v0.2.2/yugo_physx_tracker-0.4.0.zip) est un add-on séparé pour **Blender 5.1/5.2 sur Windows x64**. Son package existant et son checksum, restent inchangés ; le support de PhysX pour Linux et macOS n’est pas inclus dans cette version.
+Installez son .ZIP (environ 242 Mo) après avoir activé Yugo, puis ouvrez l’éditeur de nœuds et choisissez **Add → PhysX Physics → Create PhysX Tracker Demo**.
 Cliquez sur **Play** dans le nœud **PhysX Physics** pour tester le squelette fourni et l’exemple de marche. Votre propre VRM n’est pas requis pour cette démo.
 
 - [Démarrage rapide sur Yugo DOC](https://hiiiodigital.com/Yugo-Docs/tutorials/getting-started.html)
@@ -84,6 +87,6 @@ Yugo builds on these open-source projects:
 
 Merci à toutes les personnes qui contribuent au code, aux traductions, au design, à la documentation et aux tests de Yugo.
 
-| Contributeur | Contribution |
-| --- | --- |
+| Contributeur            | Contribution                   |
+| ----------------------- | ------------------------------ |
 | **Jems / L’Archiviste** | Traduction française du README |
